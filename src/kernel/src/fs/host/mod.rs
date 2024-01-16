@@ -5,6 +5,7 @@ use super::{
     VnodeType,
 };
 use crate::errno::{Errno, EIO};
+use crate::info;
 use crate::ucred::Ucred;
 use macros::Errno;
 use std::borrow::Cow;
@@ -54,6 +55,8 @@ pub fn mount(
         Ok(v) => v,
         Err(e) => return Err(Box::new(MountError::OpenRootFailed(root, e))),
     };
+
+    // info!("map {map:?}");
 
     // Set mount data.
     Ok(Mount::new(

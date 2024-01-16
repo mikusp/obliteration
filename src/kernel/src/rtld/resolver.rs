@@ -1,5 +1,6 @@
 use super::Module;
 use crate::ee::ExecutionEngine;
+use crate::warn;
 use bitflags::bitflags;
 use elf::Symbol;
 use std::borrow::Cow;
@@ -92,8 +93,21 @@ impl<'a, E: ExecutionEngine> SymbolResolver<'a, E> {
         {
             return Some(v);
         } else if sym.binding() == Symbol::STB_WEAK {
+            if let Some(d_name) = decoded_name.to_owned() {
+                if d_name == "module_start" || d_name == "module_stop" {
+                    return None;
+                }
+            }
+            if name == Some("module_start") || name == Some("module_stop") {
+                return None;
+            }
             // TODO: Return sym_zero.
+            warn!(
+                "resolving weak symbol{:?}, {:?}, {:?}, {:?}, {:?}",
+                name, decoded_name, symmod, symlib, sym
+            );
             todo!("resolving weak symbol");
+            // return Some(self.mains[0]);
         }
 
         None

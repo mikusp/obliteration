@@ -19,6 +19,9 @@ members = [
 
 default-members = ["core", "kernel"]
 
+[toolchain]
+channel = "nightly"
+
 [profile.dev]
 panic = "abort"
 

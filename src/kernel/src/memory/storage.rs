@@ -8,6 +8,7 @@ use std::io::Error;
 /// Multiple [`super::Alloc`] can share a single storage.
 pub(super) trait Storage: Debug {
     fn addr(&self) -> *mut u8;
+    fn commit(&self, addr: *mut u8, len: usize, prot: Protections) -> Result<(), Error>;
     fn decommit(&self, addr: *mut u8, len: usize) -> Result<(), Error>;
     fn protect(&self, addr: *mut u8, len: usize, prot: Protections) -> Result<(), Error>;
     fn set_name(&self, addr: *mut u8, len: usize, name: &CStr) -> Result<(), Error>;
@@ -102,11 +103,43 @@ impl Memory {
             Ok(())
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn name(self: &Self, name: &str) -> () {
+        use libc::prctl;
+        use std::ffi::CString;
+
+        if self.addr == std::ptr::null_mut() || name.is_empty() {
+            return;
+        }
+
+        use crate::warn;
+        unsafe {
+            let ret = prctl(
+                libc::PR_SET_VMA,
+                libc::PR_SET_VMA_ANON_NAME,
+                self.addr as u64,
+                self.len,
+                CString::new(name).unwrap().as_bytes_with_nul(),
+            );
+
+            if ret != 0 {
+                warn!("prctl failed {}", Error::last_os_error());
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn name(self: &Self, name: &str) -> () {}
 }
 
 impl Storage for Memory {
     fn addr(&self) -> *mut u8 {
         self.addr
+    }
+
+    fn commit(&self, addr: *mut u8, len: usize, prot: Protections) -> Result<(), Error> {
+        Memory::commit(&self, addr, len, prot)
     }
 
     #[cfg(unix)]

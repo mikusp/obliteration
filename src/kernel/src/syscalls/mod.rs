@@ -39,9 +39,13 @@ impl Syscalls {
     ) {
         let o = o.clone();
 
-        assert!(self.handlers[id as usize]
-            .replace(Box::new(move |td, i| handler(&o, td, i)))
-            .is_none());
+        assert!(
+            self.handlers[id as usize]
+                .replace(Box::new(move |td, i| handler(&o, td, i)))
+                .is_none(),
+            "{} syscall is already defined",
+            id
+        );
     }
 
     /// # Safety
@@ -77,7 +81,7 @@ impl Syscalls {
         let v = match handler(&td, i) {
             Ok(v) => v,
             Err(e) => {
-                warn!(e, "Syscall {} failed", i.id);
+                warn!(e, "Syscall {:?} failed", i);
                 return e.errno().get().into();
             }
         };

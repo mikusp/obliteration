@@ -1,8 +1,10 @@
 use std::collections::HashMap;
-use std::io::Error;
+use std::io::{Error, SeekFrom};
 use std::mem::zeroed;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
+
+use crate::info;
 
 /// Encapsulate a raw file or directory on the host.
 #[derive(Debug)]
@@ -118,6 +120,18 @@ impl HostFile {
             volume: i.dwVolumeSerialNumber,
             index: (Into::<u64>::into(i.nFileIndexHigh) << 32) | Into::<u64>::into(i.nFileIndexLow),
         })
+    }
+
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        let result = Self::raw_read(self, buf);
+
+        result
+    }
+
+    pub fn seek(&self, pos: SeekFrom) -> Result<u64, Error> {
+        let result = Self::raw_seek(self, pos);
+
+        result
     }
 
     #[cfg(unix)]
@@ -328,6 +342,39 @@ impl HostFile {
             Err(Error::from_raw_os_error(unsafe {
                 RtlNtStatusToDosError(err).try_into().unwrap()
             }))
+        }
+    }
+
+    #[cfg(unix)]
+    fn raw_read(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        let bytes_read = unsafe { libc::read(self.raw, buf.as_mut_ptr().cast(), buf.len()) };
+
+        if bytes_read < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(bytes_read.try_into().unwrap())
+        }
+    }
+
+    #[cfg(unix)]
+    fn raw_seek(&self, pos: SeekFrom) -> Result<u64, Error> {
+        let offset = match pos {
+            SeekFrom::Current(off) => off,
+            SeekFrom::End(off) => off,
+            SeekFrom::Start(off) => off.try_into().unwrap(),
+        };
+        let whence = match pos {
+            SeekFrom::Current(_) => libc::SEEK_CUR,
+            SeekFrom::End(_) => libc::SEEK_END,
+            SeekFrom::Start(_) => libc::SEEK_SET,
+        };
+
+        let ret = unsafe { libc::lseek(self.raw, offset, whence) };
+
+        if ret < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(ret.try_into().unwrap())
         }
     }
 }

@@ -6,7 +6,7 @@ pub struct SignalActs {
     handler: [usize; SIG_MAXSIG as usize],       // ps_sigact
     catchmask: [SignalSet; SIG_MAXSIG as usize], // ps_catchmask
     stack: SignalSet,                            // ps_sigonstack
-    interupt: SignalSet,                         // ps_sigintr
+    interrupt: SignalSet,                        // ps_sigintr
     reset: SignalSet,                            // ps_sigreset
     nodefer: SignalSet,                          // ps_signodefer
     modern: SignalSet,                           // ps_siginfo
@@ -21,7 +21,7 @@ impl SignalActs {
             handler: [0; SIG_MAXSIG as usize],
             catchmask: [SignalSet::default(); SIG_MAXSIG as usize],
             stack: SignalSet::default(),
-            interupt: SignalSet::default(),
+            interrupt: SignalSet::default(),
             reset: SignalSet::default(),
             nodefer: SignalSet::default(),
             modern: SignalSet::default(),
@@ -52,7 +52,11 @@ impl SignalActs {
     }
 
     pub fn set_interupt(&mut self, sig: Signal) {
-        self.interupt.add(sig);
+        self.interrupt.add(sig);
+    }
+
+    pub fn remove_interrupt(&mut self, sig: Signal) {
+        self.interrupt.remove(sig);
     }
 
     pub fn remove_reset(&mut self, sig: Signal) {
@@ -93,7 +97,7 @@ impl SignalActs {
         if self.stack.contains(sig) {
             flags |= SignalFlags::SA_ONSTACK;
         }
-        if self.interupt.contains(sig) {
+        if self.interrupt.contains(sig) {
             flags |= SignalFlags::SA_RESTART;
         }
         if self.reset.contains(sig) {

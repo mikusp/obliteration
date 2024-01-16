@@ -1,15 +1,27 @@
+use self::host::HostFs;
 use crate::errno::{Errno, EBADF, EBUSY, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ESPIPE};
+use crate::error;
+// use crate::fs::host::MountSource::{self, Bind, Host};
 use crate::info;
 use crate::process::{GetFileError, VThread};
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::PrivilegeError;
 use crate::ucred::{Privilege, Ucred};
+use crate::warn;
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup};
 use macros::{vpath, Errno};
+use param::Param;
+use std::any::Any;
+use std::backtrace::Backtrace;
+use std::borrow::BorrowMut;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::num::TryFromIntError;
+use std::io::{Error, Seek, SeekFrom};
+use std::mem;
+use std::num::{NonZeroI32, TryFromIntError};
+use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -45,6 +57,41 @@ pub struct Fs {
     mounts: Gutex<Mounts>,   // mountlist
     root: Gutex<Arc<Vnode>>, // rootvnode
     kern_cred: Arc<Ucred>,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TimeSpec {
+    sec: i64,
+    nsec: i64,
+}
+
+#[repr(C)]
+pub struct Stat {
+    dev: i32,
+    ino: u32,
+    pub mode: u16,
+    nlink: u16,
+    uid: u32,
+    gid: u32,
+    rdev: i32,
+    atime: TimeSpec,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
+    pub size: i64,
+    block_count: i64,
+    pub block_size: u32,
+    flags: u32,
+    gen: u32,
+    _spare: i32,
+    birthtime: TimeSpec,
+}
+
+impl Stat {
+    /// This is what would happen when calling `bzero` on a `stat` structure.
+    pub fn zeroed() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
 }
 
 impl Fs {
@@ -214,7 +261,7 @@ impl Fs {
 
             // Prevent ".." on root so this cannot escape from chroot.
             if com == ".." && Arc::ptr_eq(&resolved, &root) {
-                return Err(LookupError::NotFound);
+                return Err(LookupError::EscapeChroot);
             }
 
             // Lookup next component.
@@ -222,7 +269,7 @@ impl Fs {
                 Ok(v) => v,
                 Err(e) => {
                     if e.errno() == ENOENT {
-                        return Err(LookupError::NotFound);
+                        return Err(LookupError::NotFound(e));
                     } else {
                         return Err(LookupError::LookupFailed(
                             i,
@@ -391,6 +438,7 @@ impl Fs {
         // Get arguments.
         let path = unsafe { i.args[0].to_path()?.unwrap() };
         let flags: OpenFlags = i.args[1].try_into().unwrap();
+        warn!("sys_open() {:?} {:?} {:?}", path, flags.0, i.args);
         let mode: u32 = i.args[2].try_into().unwrap();
 
         // Check flags.
@@ -410,12 +458,12 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            // todo!("open({path}) with flags & O_TRUNC");
         } else if mode != 0 {
             todo!("open({path}, {flags}) with mode = {mode}");
         }
 
-        info!("Opening {path} with flags = {flags}.");
+        // info!("Opening {path} with flags = {flags}.");
 
         // Lookup file.
         let mut file = self.open(path, Some(td))?;
@@ -433,7 +481,7 @@ impl Fs {
     fn sys_close(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let fd: i32 = i.args[0].try_into().unwrap();
 
-        info!("Closing fd {fd}.");
+        // info!("Closing fd {fd}.");
 
         td.proc().files().free(fd)?;
 
@@ -489,9 +537,9 @@ impl Fs {
         // TODO: Check if the PS4 follow the vnode.
         let vn = self.lookup(path, true, Some(td))?;
 
-        if !vn.is_character() {
-            return Err(SysErr::Raw(EINVAL));
-        }
+        // if !vn.is_character() {
+        //     return Err(SysErr::Raw(EINVAL));
+        // }
 
         // TODO: It seems like the initial ucred of the process is either root or has PRIV_VFS_ADMIN
         // privilege.
@@ -931,7 +979,6 @@ impl Display for OpenFlags {
         }
     }
 }
-
 /// An implementation of `vfsconf` structure.
 #[derive(Debug)]
 pub struct FsConfig {
@@ -1110,7 +1157,11 @@ pub enum LookupError {
 
     #[error("no such file or directory")]
     #[errno(ENOENT)]
-    NotFound,
+    EscapeChroot,
+
+    #[error("no such file or directory")]
+    #[errno(ENOENT)]
+    NotFound(#[source] Box<dyn Errno>),
 
     #[error("cannot lookup '{1}' from component #{0}")]
     LookupFailed(usize, Box<str>, #[source] Box<dyn Errno>),

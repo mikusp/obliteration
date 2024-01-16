@@ -43,6 +43,10 @@ macro_rules! commands {
                 pub const IOC_OUT: u32 = 0x40000000;
                 pub const IOC_IN: u32 = 0x80000000;
 
+                fn discriminant(&self) -> u32 {
+                    unsafe { *(self as *const Self as *const u32) }
+                }
+
                 pub fn try_from_raw_parts(cmd: u64, arg: *mut u8) -> Result<Self, SysErr> {
                     let cmd = cmd as u32;
 
@@ -100,5 +104,11 @@ commands! {
         TIOCSCTTY = 0x20007461,
         /// Get media size in bytes.
         DIOCGMEDIASIZE(&i64) = 0x40086418,
+    }
+}
+
+impl<'a> PartialEq for IoCmd<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.discriminant() == other.discriminant()
     }
 }

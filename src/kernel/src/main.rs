@@ -1,12 +1,17 @@
+#![feature(core_intrinsics)]
 use crate::arch::MachDep;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::debug::{DebugManager, DebugManagerInitError};
 use crate::dmem::DmemManager;
-use crate::ee::{EntryArg, RawFn};
+use crate::ee::{native, EntryArg, RawFn};
 use crate::errno::EEXIST;
+use crate::errno::EINVAL;
+use crate::evf::EvfManager;
 use crate::fs::{Fs, FsInitError, MkdirError, MountError, MountFlags, MountOpts, VPath};
+use crate::gc::GcManager;
+use crate::hid::HidManager;
+use crate::ipmi::IpmiManager;
 use crate::kqueue::KernelQueueManager;
-use crate::llvm::Llvm;
 use crate::log::{print, LOGGER};
 use crate::memory::{MemoryManager, MemoryManagerError};
 use crate::namedobj::NamedObjManager;
@@ -14,6 +19,7 @@ use crate::net::NetManager;
 use crate::osem::OsemManager;
 use crate::process::{VProc, VProcInitError, VThread};
 use crate::regmgr::RegMgr;
+use crate::rng::RngManager;
 use crate::rtld::{LoadFlags, ModuleFlags, RuntimeLinker};
 use crate::shm::SharedMemoryManager;
 use crate::syscalls::Syscalls;
@@ -23,18 +29,29 @@ use crate::tty::{TtyInitError, TtyManager};
 use crate::ucred::{AuthAttrs, AuthCaps, AuthInfo, AuthPaid, Gid, Ucred, Uid};
 use crate::umtx::UmtxManager;
 use clap::{Parser, ValueEnum};
+use gmtx::{Gutex, GutexGroup};
 use hv::Hypervisor;
+use libc::{memcpy, socket};
 use llt::{OsThread, SpawnError};
 use macros::vpath;
 use param::Param;
 use serde::Deserialize;
+use std::borrow::{Borrow, BorrowMut};
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs::{create_dir_all, remove_dir_all, File};
 use std::io::Write;
+use std::mem::size_of;
+use std::ops::DerefMut;
+use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::process::{ExitCode, Termination};
-use std::sync::Arc;
+use std::rc::Weak;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::SystemTime;
+use syscalls::{SysErr, SysIn, SysOut};
 use sysinfo::{MemoryRefreshKind, System};
 use thiserror::Error;
 
@@ -45,10 +62,13 @@ mod debug;
 mod dmem;
 mod ee;
 mod errno;
+mod evf;
 mod fs;
+mod gc;
+mod hid;
 mod idt;
+mod ipmi;
 mod kqueue;
-mod llvm;
 mod log;
 mod memory;
 mod namedobj;
@@ -56,6 +76,7 @@ mod net;
 mod osem;
 mod process;
 mod regmgr;
+mod rng;
 mod rtld;
 mod shm;
 mod signal;
@@ -148,7 +169,7 @@ fn start() -> Result<(), KernelError> {
     writeln!(
         log,
         "Application Version : {}",
-        param.app_ver().unwrap_or("UNKNOWN")
+        param.app_ver().unwrap_or(&String::from("UNKNOWN"))
     )
     .unwrap();
 
@@ -190,7 +211,6 @@ fn start() -> Result<(), KernelError> {
     ));
 
     // Initialize foundations.
-    let llvm = Llvm::new();
     let mut syscalls = Syscalls::new();
     let fs = Fs::new(args.system, &cred, &mut syscalls)?;
 
@@ -253,15 +273,390 @@ fn start() -> Result<(), KernelError> {
             error!("Native execution engine cannot be used on your machine.");
             Err(KernelError::NativeExecutionEngineNotSupported)
         }
-        ExecutionEngine::Llvm => run(
-            args.debug_dump,
-            &param,
-            auth,
-            syscalls,
-            &fs,
-            &mm,
-            crate::ee::llvm::LlvmEngine::new(&llvm),
-        ),
+    }
+}
+
+thread_local! {
+    static LOCKS: RefCell<BTreeMap<usize, MutexGuard<'static, bool>>> = RefCell::new(BTreeMap::new());
+}
+
+struct MutexHolder {
+    lock: Arc<Mutex<bool>>,
+    guard: Gutex<RefCell<Option<MutexGuard<'static, bool>>>>,
+}
+
+unsafe impl Send for MutexHolder {}
+
+impl MutexHolder {
+    pub fn new(init: bool) -> MutexHolder {
+        let gg = GutexGroup::new();
+        Self {
+            lock: Arc::new(Mutex::new(init)),
+            guard: gg.spawn(RefCell::new(None)),
+        }
+    }
+
+    pub fn lock(&self) -> () {
+        let g = self.lock.lock().unwrap();
+
+        let static_guard = Self::extend_lifetime(g);
+        self.guard.write().replace(Some(static_guard));
+
+        // static_guard
+    }
+
+    pub fn into_inner<'a>(&self) -> MutexGuard<'a, bool> {
+        let g = self.guard.write();
+
+        let guard = g.replace(None);
+
+        guard.unwrap()
+        // g.into_inner().unwrap()
+    }
+
+    // pub fn unlock(&self) -> () {
+    //     let mut guard = self.guard.write();
+
+    //     // assert!((*guard).is_some());
+    //     // let arc = &*guard;
+
+    //     match arc {
+    //         Some(m) => drop(m),
+    //         _ => unreachable!(),
+    //     }
+    //     *guard = None;
+    // }
+
+    fn extend_lifetime<'a, A>(g: MutexGuard<'a, A>) -> MutexGuard<'static, A> {
+        unsafe { std::mem::transmute(g) }
+    }
+}
+
+struct SyscallsStubs {
+    cvs: Gutex<BTreeMap<usize, Condvar>>,
+    mutexes: Gutex<BTreeMap<usize, MutexHolder>>,
+}
+
+#[repr(C)]
+struct ThrParam {
+    start_func: *const c_void,
+    arg: *const c_void,
+    stack_base: usize,
+    stack_size: usize,
+    tls_base: usize,
+    tls_size: usize,
+    child_tid: *const usize,
+    parent_tid: *const usize,
+    flags: i32,
+    rtp: usize,
+    spare_1: usize,
+    spare_2: usize,
+    spare_3: usize,
+}
+
+impl SyscallsStubs {
+    fn stub(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let arg1: usize = i.args[0].into();
+        let arg2: usize = i.args[1].into();
+        let arg3: usize = i.args[2].into();
+        let arg4: usize = i.args[3].into();
+        let arg5: usize = i.args[4].into();
+        let arg6: usize = i.args[5].into();
+        warn!(
+            "stubbed syscall_{}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+            i.id, arg1, arg2, arg3, arg4, arg5, arg6
+        );
+
+        Ok(0.into())
+    }
+
+    fn new(syscalls: &mut Syscalls) -> () {
+        let gg = GutexGroup::new();
+        let stubs = Arc::new(Self {
+            cvs: gg.spawn(BTreeMap::new()),
+            mutexes: gg.spawn(BTreeMap::new()),
+        });
+        // syscalls.register(209, &stubs, |_, _, i| {
+        //     #[repr(C)]
+        //     #[derive(Debug)]
+        //     struct PollFd {
+        //         pub fd: i32,
+        //         pub events: i16,
+        //         pub revents: i16,
+        //     }
+
+        //     let arg1: *const PollFd = i.args[0].into();
+        //     let nfds: usize = i.args[1].into();
+        //     let timeout: i64 = i.args[2].into();
+
+        //     let fds = unsafe { std::slice::from_raw_parts(arg1, nfds) };
+
+        //     warn!("stubbed sys_poll({:?}, {}, {})", fds, nfds, timeout);
+
+        //     Ok(nfds.into())
+        // });
+        syscalls.register(331, &stubs, |_, _, _| {
+            warn!("stubbed sys_sched_yield");
+            Ok(0.into())
+        });
+        syscalls.register(203, &stubs, |_, _, _| {
+            warn!("stubbed sys_mlock");
+            Ok(0.into())
+        });
+        syscalls.register(95, &stubs, |_, _, _| {
+            warn!("stubbed sys_fsync");
+            Ok(0.into())
+        });
+        // syscalls.register(232, &stubs, |_, _, i| {
+        //     let clock_id: i32 = i.args[0].try_into().unwrap();
+        //     let ts: *mut ::libc::timespec = i.args[1].into();
+
+        //     unsafe {
+        //         ::libc::clock_gettime(clock_id, ts);
+        //     }
+
+        //     Ok(0.into())
+        // });
+        syscalls.register(548, &stubs, Self::stub);
+        // syscalls.register(136, &stubs, Self::stub);
+        syscalls.register(234, &stubs, Self::stub);
+        // syscalls.register(480, &stubs, Self::stub);
+        // syscalls.register(188, &stubs, Self::stub);
+        // syscalls.register(538, &stubs, Self::stub);
+        // syscalls.register(362, &stubs, Self::stub);
+        // syscalls.register(141, &stubs, Self::stub);
+        syscalls.register(612, &stubs, Self::stub);
+        // syscalls.register(483, &stubs, Self::stub);
+        syscalls.register(670, &stubs, Self::stub);
+        syscalls.register(455, &stubs, |_, _, i| {
+            let thr_param: *const ThrParam = i.args[0].into();
+            let thr_param_size: usize = i.args[1].into();
+
+            info!(
+                "stubbed sys_thr_new({:#x}, {:#x})",
+                thr_param as usize, thr_param_size
+            );
+
+            assert_eq!(size_of::<ThrParam>(), 0x68);
+
+            if thr_param_size > 0x68 {
+                return Err(SysErr::Raw(EINVAL));
+            }
+
+            let params: &ThrParam = unsafe { &*thr_param };
+
+            fn create_thread(
+                start_func: *const c_void,
+                arg: usize,
+                stack_base: usize,
+                stack_size: usize,
+                tls_base: usize,
+                tls_size: usize,
+                child_tid: *mut usize,
+                parent_tid: *mut usize,
+                flags: i32,
+                rtp: usize,
+                spare_1: usize,
+                spare_2: usize,
+                spare_3: usize,
+            ) -> Result<SysOut, SysErr> {
+                info!("create_thread({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+                    start_func as usize, arg as usize, stack_base, stack_size, tls_base, tls_size,
+                    child_tid as usize, parent_tid as usize, flags, rtp, spare_1, spare_2, spare_3);
+
+                let new_td = VThread::new(VThread::current().unwrap().proc().clone(), VThread::current().unwrap().cred());
+                new_td.pcb_mut().set_fsbase(tls_base);
+                let entry = native::RawFn { md: Arc::new(()), addr: start_func as usize };
+                let entry = move || unsafe { entry.exec1(arg) };
+
+                let ret = unsafe {new_td.start(stack_base as *mut u8, stack_size, entry)};
+
+                match ret {
+                    Ok(ret) => unsafe {
+                        if !child_tid.is_null() {
+                            *child_tid = ret as usize;
+                        }
+                        if !parent_tid.is_null() {
+                            *parent_tid = ret as usize;
+                        }
+
+                        Ok(0.into())
+                    },
+                    Err(_) => Err(SysErr::Raw(EINVAL))
+                }
+            }
+
+            return create_thread(
+                params.start_func,
+                params.arg as usize,
+                params.stack_base,
+                params.stack_size,
+                params.tls_base,
+                params.tls_size,
+                params.child_tid as *mut usize,
+                params.parent_tid as *mut usize,
+                params.flags,
+                params.rtp,
+                params.spare_1,
+                params.spare_2,
+                params.spare_3,
+            );
+
+            // Ok(0.into())
+        });
+        syscalls.register(454, &stubs, |s, _, i| {
+            let obj: usize = i.args[0].into();
+            let op: usize = i.args[1].into();
+            let val: usize = i.args[2].into();
+            let uaddr: usize = i.args[3].into();
+            let uaddr2: usize = i.args[4].into();
+            let arg6: usize = i.args[5].into();
+            warn!(
+                "stubbed sys_umtx_op({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+                obj, op, val, uaddr, uaddr2, arg6
+            );
+
+            if op > 22 {
+                // UMTX_MAX_OP
+                return Err(SysErr::Raw(EINVAL));
+            }
+
+            match op {
+                // UMTX_OP_MUTEX_LOCK
+                0x5 => {
+                    let umutex = obj;
+
+                    let mut mutexes = s.mutexes.write();
+                    let entry = mutexes.entry(umutex);
+                    let mutex = match entry {
+                        Entry::Occupied(ref e) => e.get(),
+                        Entry::Vacant(e) => {
+                            let mutex = MutexHolder::new(false);
+                            e.insert(mutex)
+                        }
+                    };
+
+                    let guard = mutex.lock();
+                    drop(mutexes);
+
+                    return Ok(0.into());
+                    // todo!("UMTX_OP_MUTEX_LOCK")
+                }
+                // UMTX_OP_CV_WAIT
+                0x8 => {
+                    let ucond = obj;
+                    let flags = val;
+                    let umutex = uaddr;
+                    let timeout = uaddr2;
+
+                    if timeout != 0 {
+                        todo!("UMTX_OP_CV_WAIT with timeout");
+                    }
+
+                    let mut cvs = s.cvs.write();
+                    let entry = cvs.entry(ucond);
+                    let cv = match entry {
+                        Entry::Vacant(e) => {
+                            let cv = Condvar::new();
+                            e.insert(cv)
+                        }
+                        Entry::Occupied(ref e) => e.get(),
+                    };
+
+                    let mut mutexes = s.mutexes.write();
+                    let entry = mutexes.entry(umutex);
+                    let mutex = match entry {
+                        Entry::Vacant(e) => {
+                            let mutex = MutexHolder::new(false);
+                            e.insert(mutex)
+                            // panic!("mutex for cv does not exist")
+                        }
+                        Entry::Occupied(ref mutex) => mutex.get(),
+                    };
+                    mutex.lock();
+                    let mut guard = mutex.into_inner();
+
+                    drop(mutexes);
+                    // drop(cvs);
+                    while !*guard {
+                        guard = cv.wait(guard).unwrap();
+                    }
+
+                    return Ok(0.into());
+                    // todo!("UMTX_OP_CV_WAIT")
+                }
+                _ => todo!("unknown umtx_op: {:#x}", op),
+            }
+        });
+        // syscalls.register(544, &stubs, Self::stub);
+        syscalls.register(638, &stubs, Self::stub);
+        syscalls.register(272, &stubs, Self::stub);
+        // syscalls.register(546, &stubs, Self::stub);
+        // syscalls.register(478, &stubs, Self::stub);
+        // syscalls.register(488, &stubs, |_, _, i| {
+        //     let arg1: usize = i.args[0].into();
+        //     let arg2: usize = i.args[1].into();
+        //     let arg3: usize = i.args[2].into();
+        //     let arg4: usize = i.args[3].into();
+        //     let arg5: usize = i.args[4].into();
+        //     warn!(
+        //         "stubbed sys_cpuset_setaffinity({:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+        //         arg1, arg2, arg3, arg4, arg5
+        //     );
+
+        //     Ok(0.into())
+        // });
+        // syscalls.register(542, &stubs, Self::stub);
+        // syscalls.register(545, &stubs, Self::stub);
+        // syscalls.register(572, &stubs, |_, _| Ok(1.into()));
+        syscalls.register(643, &stubs, Self::stub);
+        syscalls.register(654, &stubs, Self::stub);
+        syscalls.register(74, &stubs, Self::stub);
+        // syscalls.register(189, &stubs, Self::stub);
+        // syscalls.register(482, &stubs, |_, _, i| {
+        //     let name: &str = unsafe { i.args[0].to_str(255)?.unwrap() };
+        //     info!("stubbed sys_shm_open({})", name);
+        //     Ok(666.into())
+        // });
+        // syscalls.register(97, &stubs, |_, _, i| {
+        //     let domain = i.args[0].try_into().unwrap();
+        //     let ty = i.args[1].try_into().unwrap();
+        //     let protocol = i.args[2].try_into().unwrap();
+        //     warn!("stubbed sys_socket({:?}, {:?}, {:?})", domain, ty, protocol);
+        //     let fd = unsafe { socket(domain, ty, protocol) };
+
+        //     Ok(fd.into())
+        // });
+        syscalls.register(98, &stubs, |_, _, _| Ok((-1).into()));
+        syscalls.register(99, &stubs, |_, _, i| {
+            let arg1: usize = i.args[0].into();
+            let arg2: usize = i.args[1].into();
+            let arg3: usize = i.args[2].into();
+            let arg4: usize = i.args[3].into();
+            warn!(
+                "stubbed sys_netcontrol({:#x}, {:#x}, {:#x}, {:#x})",
+                arg1, arg2, arg3, arg4
+            );
+
+            Ok(0.into())
+        });
+        // syscalls.register(113, &stubs, |_, _, _| Ok(666.into()));
+        syscalls.register(114, &stubs, Self::stub);
+        // syscalls.register(133, &stubs, |_, _, i| {
+        //     let arg1: usize = i.args[0].into();
+        //     warn!("stubbed sys_sendto({:#x})", arg1);
+
+        //     let len: usize = i.args[2].into();
+
+        //     Ok(len.into())
+        // });
+        // syscalls.register(116, &stubs, Self::stub);
+        // syscalls.register(622, &stubs, Self::stub);
+        // syscalls.register(550, &stubs, Self::stub);
+        // syscalls.register(540, &stubs, Self::stub);
+        syscalls.register(539, &stubs, Self::stub);
+        // syscalls.register(549, &stubs, Self::stub);
+        // syscalls.register(551, &stubs, Self::stub);
     }
 }
 
@@ -278,6 +673,9 @@ fn run<E: crate::ee::ExecutionEngine>(
     #[allow(unused_variables)] // TODO: Remove this when someone use tty.
     let tty = TtyManager::new()?;
 
+    // let dipsw = Dipsw::new();
+    // let _ = SblService::new();
+
     // Initialize kernel components.
     #[allow(unused_variables)] // TODO: Remove this when someone use debug.
     let debug = DebugManager::new()?;
@@ -285,12 +683,16 @@ fn run<E: crate::ee::ExecutionEngine>(
     let machdep = MachDep::new(&mut syscalls);
     let budget = BudgetManager::new(&mut syscalls);
 
-    DmemManager::new(fs, &mut syscalls);
     SharedMemoryManager::new(mm, &mut syscalls);
-    Sysctl::new(mm, &machdep, &mut syscalls);
     TimeManager::new(&mut syscalls);
     KernelQueueManager::new(&mut syscalls);
     NetManager::new(&mut syscalls);
+    DmemManager::new(&fs, mm, &mut syscalls);
+    Sysctl::new(mm, &machdep, &mut syscalls);
+    SyscallsStubs::new(&mut syscalls);
+    GcManager::new();
+    RngManager::new();
+    HidManager::new();
 
     // TODO: Get correct budget name from the PS4.
     let budget_id = budget.create(Budget::new("big app", ProcType::BigApp));
@@ -305,8 +707,10 @@ fn run<E: crate::ee::ExecutionEngine>(
     )?;
 
     NamedObjManager::new(&mut syscalls, &proc);
-    OsemManager::new(&mut syscalls, &proc);
     UmtxManager::new(&mut syscalls);
+    IpmiManager::new(&mut syscalls, &proc);
+    OsemManager::new(&mut syscalls, &proc);
+    EvfManager::new(&mut syscalls, &proc);
 
     // Initialize runtime linker.
     info!("Initializing runtime linker.");
@@ -474,6 +878,9 @@ struct Args {
     game: PathBuf,
 
     #[arg(long)]
+    eboot: Option<PathBuf>,
+
+    #[arg(long)]
     debug_dump: Option<PathBuf>,
 
     #[arg(long)]
@@ -491,7 +898,6 @@ struct Args {
 #[derive(Clone, ValueEnum, Deserialize)]
 enum ExecutionEngine {
     Native,
-    Llvm,
 }
 
 impl Default for ExecutionEngine {

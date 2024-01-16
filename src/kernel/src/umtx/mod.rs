@@ -11,7 +11,7 @@ impl UmtxManager {
     pub fn new(sys: &mut Syscalls) -> Arc<Self> {
         let umtx = Arc::new(UmtxManager {});
 
-        sys.register(454, &umtx, Self::sys__umtx_op);
+        // sys.register(454, &umtx, Self::sys__umtx_op);
 
         umtx
     }

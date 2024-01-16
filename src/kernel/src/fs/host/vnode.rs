@@ -2,6 +2,7 @@ use super::file::HostFile;
 use super::{get_vnode, GetVnodeError, HostFs};
 use crate::errno::{Errno, EEXIST, EIO, ENOENT, ENOTDIR};
 use crate::fs::{Access, IoCmd, Mode, OpenFlags, VFile, Vnode, VnodeAttrs, VnodeType};
+use crate::info;
 use crate::process::VThread;
 use crate::ucred::{Gid, Uid};
 use macros::Errno;

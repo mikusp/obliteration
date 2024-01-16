@@ -8,6 +8,7 @@ use std::num::TryFromIntError;
 
 /// Input of the syscall entry point.
 #[repr(C)]
+#[derive(Debug)]
 pub struct SysIn<'a> {
     pub id: u32,
     pub offset: usize,
@@ -17,7 +18,7 @@ pub struct SysIn<'a> {
 
 /// An argument of the syscall.
 #[repr(transparent)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SysArg(usize);
 
 impl SysArg {
@@ -31,7 +32,11 @@ impl SysArg {
         let path = match path.to_str() {
             Ok(v) => match VPath::new(v) {
                 Some(v) => v,
-                None => todo!("syscall with non-absolute path {v}"),
+                None =>
+                // todo!("syscall with non-absolute path {v}"),
+                {
+                    return Err(SysErr::Raw(ENOENT))
+                }
             },
             Err(_) => return Err(SysErr::Raw(ENOENT)),
         };

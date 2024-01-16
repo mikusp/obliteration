@@ -26,7 +26,7 @@ pub struct Memory {
 }
 
 impl Memory {
-    pub(super) fn new<N: Into<String>>(
+    pub(super) fn new<N: Into<String> + Copy>(
         mm: &Arc<MemoryManager>,
         image: &Elf<VFile>,
         base: usize,
@@ -122,7 +122,7 @@ impl Memory {
         let obcode = segments.len();
         let segment = MemorySegment {
             start: len,
-            len: (1024 * 1024) * 4,
+            len: (1024 * 1024) * 16,
             program: None,
             prot: Protections::CPU_READ | Protections::CPU_EXEC,
         };
@@ -145,7 +145,11 @@ impl Memory {
 
         // TODO: Use separate name for our code and data.
         let mut pages = match mm.mmap(
-            0,
+            if name.into() == "executable" {
+                0x400000
+            } else {
+                0x800000000
+            },
             len,
             Protections::empty(),
             name,

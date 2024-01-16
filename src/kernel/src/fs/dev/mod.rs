@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 
 mod cdev;
+pub mod dipsw;
 mod dirent;
+pub mod sblsrv;
 mod vnode;
 
 /// See `make_dev_credv` on the PS4 for a reference.

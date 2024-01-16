@@ -162,31 +162,22 @@ bitflags! {
 /// An implementation of `cdevsw` structure.
 #[derive(Debug)]
 pub struct CdevSw {
-    flags: DriverFlags,     // d_flags
-    open: Option<CdevOpen>, // d_open
-    fdopen: Option<CdevFd>, // d_fdopen
+    flags: DriverFlags, // d_flags
+    open: CdevOpen,     // d_open
 }
 
 impl CdevSw {
     /// See `prep_cdevsw` on the PS4 for a reference.
-    pub fn new(flags: DriverFlags, open: Option<CdevOpen>, fdopen: Option<CdevFd>) -> Self {
-        Self {
-            flags,
-            open,
-            fdopen,
-        }
+    pub fn new(flags: DriverFlags, open: CdevOpen) -> Self {
+        Self { flags, open }
     }
 
     pub fn flags(&self) -> DriverFlags {
         self.flags
     }
 
-    pub fn open(&self) -> Option<CdevOpen> {
+    pub fn open(&self) -> CdevOpen {
         self.open
-    }
-
-    pub fn fdopen(&self) -> Option<CdevFd> {
-        self.fdopen
     }
 }
 
@@ -194,7 +185,9 @@ bitflags! {
     /// Flags for [`CdevSw`].
     #[derive(Debug, Clone, Copy)]
     pub struct DriverFlags: u32 {
+        const D_TRACKCLOSE = 0x00080000;
         const D_NEEDMINOR = 0x00800000;
+        const D_INIT = 0x80000000;
     }
 }
 

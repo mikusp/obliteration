@@ -2,9 +2,10 @@ use super::dirent::Dirent;
 use super::{alloc_vnode, AllocVnodeError, DevFs};
 use crate::errno::{Errno, EIO, ENOENT, ENOTDIR, ENXIO};
 use crate::fs::{
-    check_access, Access, IoCmd, OpenFlags, RevokeFlags, VFile, Vnode, VnodeAttrs, VnodeItem,
+    check_access, Access, Cdev, IoCmd, OpenFlags, RevokeFlags, VFile, Vnode, VnodeAttrs, VnodeItem,
     VnodeType,
 };
+use crate::info;
 use crate::process::VThread;
 use macros::Errno;
 use std::sync::Arc;
@@ -181,15 +182,11 @@ impl crate::fs::VnodeBackend for VnodeBackend {
         };
         let sw = dev.sw();
 
-        if file.is_none() && sw.fdopen().is_some() {
+        if file.is_none() {
             return Err(Box::new(OpenError::NeedFile));
         }
 
-        // Execute switch handler.
-        match sw.fdopen() {
-            Some(fdopen) => fdopen(&dev, mode, td, file.as_deref_mut())?,
-            None => sw.open().unwrap()(&dev, mode, 0x2000, td)?,
-        };
+        sw.open()(&dev, mode, 0x2000, td)?;
 
         // Set file OP.
         let file = match file {
@@ -206,6 +203,35 @@ impl crate::fs::VnodeBackend for VnodeBackend {
         Ok(())
     }
 }
+
+// fn ioctl(
+//     vn: &Arc<Vnode>,
+//     td: Option<&VThread>,
+//     cmd: IoCmd,
+//     buf: &mut [u8],
+// ) -> Result<i64, Box<dyn Errno>> {
+//     const UNK_COM1: IoCmd = IoCmd::ior::<i32>(0b10001000, 0b110);
+//     let dev = vn.item().unwrap().downcast::<Cdev>().unwrap();
+//     let sw = dev.sw();
+//     match cmd {
+//         UNK_COM1 => {
+//             // info!("ioctl with cmd = 0x40048806");
+//             // info!(
+//             //     "ioctl size {} is in {} is out {}",
+//             //     UNK_COM1.size(),
+//             //     UNK_COM1.is_in(),
+//             //     UNK_COM1.is_out()
+//             // );
+//             buf[0] = 1;
+//         }
+//         _ => match sw.ioctl() {
+//             Some(fun) => return fun(&dev, cmd, buf, td),
+//             _ => (),
+//         },
+//     }
+
+//     Ok(0.into())
+// }
 
 /// Represents an error when [`lookup()`] is failed.
 #[derive(Debug, Error, Errno)]

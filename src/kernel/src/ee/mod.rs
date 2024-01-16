@@ -12,7 +12,6 @@ use std::mem::size_of_val;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub mod llvm;
 #[cfg(target_arch = "x86_64")]
 pub mod native;
 

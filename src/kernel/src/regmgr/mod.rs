@@ -71,6 +71,10 @@ impl RegMgr {
                 self.decode_key(v1, v2, td.cred(), 1)
                     .and_then(|k| todo!("regmgr_call({op}) with matched key = {k}"))
             }
+            0x1b => {
+                warn!("stubbed regmgr_call(0x1b)");
+                return Ok(SysOut::ZERO);
+            }
             0x27 | 0x40.. => Err(RegError::V800d0219),
             v => todo!("regmgr_call({v})"),
         };

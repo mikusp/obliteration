@@ -1,13 +1,17 @@
 use super::{CpuMask, CpuSet, VProc, NEXT_ID};
+use crate::ee::{EntryArg, ExecutionEngine};
 use crate::errno::Errno;
 use crate::fs::VFile;
 use crate::signal::SignalSet;
 use crate::ucred::{Privilege, PrivilegeError, Ucred};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
+use libc::c_void;
 use llt::{OsThread, SpawnError};
 use macros::Errno;
 use std::num::NonZeroI32;
+use std::pin::Pin;
+use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use thiserror::Error;
@@ -93,8 +97,22 @@ impl VThread {
         &self.cpuset
     }
 
+    pub fn name(&self) -> GutexReadGuard<'_, Option<String>> {
+        self.name.read()
+    }
+
     pub fn set_name(&self, name: Option<&str>) {
         *self.name.write() = name.map(|n| n.to_owned());
+        #[cfg(target_os = "linux")]
+        {
+            unsafe {
+                let ptr = match name {
+                    None => ptr::null(),
+                    Some(s) => s.as_ptr().cast(),
+                };
+                libc::pthread_setname_np(i32::from(self.id) as u64, ptr);
+            }
+        }
     }
 
     pub fn set_fpop(&self, file: Option<VFile>) {

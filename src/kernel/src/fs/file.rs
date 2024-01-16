@@ -6,6 +6,7 @@ use crate::kqueue::KernelQueue;
 use crate::net::Socket;
 use crate::process::VThread;
 use crate::shm::Shm;
+use crate::{error, info};
 use bitflags::bitflags;
 use macros::Errno;
 use std::fmt::Debug;
@@ -154,6 +155,8 @@ impl Seek for VFile {
 
 impl Read for VFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // info!("read VFile");
+        // Ok((self.ops.read)(self, buf, None).unwrap())
         todo!()
     }
 }

@@ -6,6 +6,7 @@ use crate::errno::{
 use crate::memory::MemoryManager;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::warn;
 use std::any::Any;
 use std::cmp::min;
 use std::ptr::null_mut;
@@ -245,6 +246,10 @@ impl Sysctl {
         }
 
         // TODO: Return ENOENT when we have implemented all of OIDs.
+        if name == [1, 14, 44, 1] {
+            return Ok(());
+        }
+
         todo!("sysctl {name:?}");
     }
 
@@ -436,7 +441,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn kern_rngpseudo(
@@ -446,7 +451,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn budgets_mlock_avail(
@@ -456,7 +461,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn budgets_mlock_total(
@@ -466,7 +471,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn machdep_tsc_freq(

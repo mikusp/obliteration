@@ -1,9 +1,10 @@
 use crate::budget::ProcType;
 use crate::errno::Errno;
-use crate::errno::{EINVAL, ENAMETOOLONG, EPERM, ERANGE, ESRCH};
+use crate::errno::{EFAULT, EINVAL, ENAMETOOLONG, EPERM, ERANGE, ESRCH};
 use crate::fs::Vnode;
 use crate::idt::Idt;
 use crate::info;
+use crate::ipmi::IpmiObject;
 use crate::signal::{
     strsignal, SignalAct, SignalFlags, SignalSet, SIGCHLD, SIGKILL, SIGSTOP, SIG_BLOCK, SIG_DFL,
     SIG_IGN, SIG_SETMASK, SIG_UNBLOCK,
@@ -11,14 +12,18 @@ use crate::signal::{
 use crate::signal::{SigChldFlags, Signal};
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{AuthInfo, Gid, Privilege, Ucred, Uid};
+use crate::warn;
+use gmtx::GutexReadGuard;
 use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
 use macros::Errno;
 use std::any::Any;
 use std::cmp::min;
+use std::collections::HashMap;
 use std::ffi::c_char;
 use std::mem::size_of;
 use std::mem::zeroed;
 use std::num::NonZeroI32;
+use std::ops::Deref;
 use std::ptr::null;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -41,6 +46,7 @@ mod group;
 mod rlimit;
 mod session;
 mod signal;
+pub mod sleep;
 mod thread;
 
 /// An implementation of `proc` structure represent the main application process.
@@ -61,6 +67,8 @@ pub struct VProc {
     limits: Limits,                    // p_limit
     comm: Gutex<Option<String>>,       // p_comm
     objects: Gutex<Idt<Arc<dyn Any + Send + Sync>>>,
+    gnt: Gutex<HashMap<String, Arc<dyn Any + Send + Sync>>>,
+    ipmi_map: Gutex<Vec<IpmiObject>>,
     budget_id: usize,
     budget_ptype: ProcType,
     dmem_container: usize,
@@ -99,6 +107,8 @@ impl VProc {
             files: FileDesc::new(root),
             system_path: system_path.into(),
             objects: gg.spawn(Idt::new(0x1000)),
+            gnt: gg.spawn(HashMap::new()),
+            ipmi_map: gg.spawn(Vec::new()),
             budget_id,
             budget_ptype,
             dmem_container,
@@ -112,17 +122,20 @@ impl VProc {
         sys.register(20, &vp, Self::sys_getpid);
         sys.register(50, &vp, Self::sys_setlogin);
         sys.register(147, &vp, Self::sys_setsid);
+        sys.register(240, &vp, Self::sys_nanosleep);
         sys.register(340, &vp, Self::sys_sigprocmask);
         sys.register(416, &vp, Self::sys_sigaction);
         sys.register(432, &vp, Self::sys_thr_self);
-        sys.register(455, &vp, Self::sys_thr_new);
+        // sys.register(455, &vp, Self::sys_thr_new);
         sys.register(464, &vp, Self::sys_thr_set_name);
         sys.register(466, &vp, Self::sys_rtprio_thread);
         sys.register(487, &vp, Self::sys_cpuset_getaffinity);
         sys.register(488, &vp, Self::sys_cpuset_setaffinity);
         sys.register(585, &vp, Self::sys_is_in_sandbox);
         sys.register(587, &vp, Self::sys_get_authinfo);
+        // sys.register(601, &vp, Self::sys_mdbg_service);
         sys.register(602, &vp, Self::sys_randomized_path);
+        sys.register(616, &vp, Self::sys_thr_get_name);
 
         Ok(vp)
     }
@@ -143,12 +156,28 @@ impl VProc {
         &self.limits[ty]
     }
 
+    pub fn name(&self) -> GutexReadGuard<'_, Option<String>> {
+        self.comm.read()
+    }
+
     pub fn set_name(&self, name: Option<&str>) {
         *self.comm.write() = name.map(|n| n.to_owned());
     }
 
+    pub fn objects(&self) -> GutexReadGuard<'_, Idt<Arc<dyn Any + Send + Sync>>> {
+        self.objects.read()
+    }
+
     pub fn objects_mut(&self) -> GutexWriteGuard<'_, Idt<Arc<dyn Any + Send + Sync>>> {
         self.objects.write()
+    }
+
+    pub fn gnt_mut(&self) -> GutexWriteGuard<'_, HashMap<String, Arc<dyn Any + Send + Sync>>> {
+        self.gnt.write()
+    }
+
+    pub fn ipmi_map_mut(&self) -> GutexWriteGuard<'_, Vec<IpmiObject>> {
+        self.ipmi_map.write()
     }
 
     pub fn budget_id(&self) -> usize {
@@ -225,6 +254,27 @@ impl VProc {
         Ok(self.id.into())
     }
 
+    fn sys_nanosleep(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        use crate::process::sleep::Timespec;
+
+        let req: *const Timespec = i.args[0].try_into().unwrap();
+        let rem: *mut Timespec = i.args[1].try_into().unwrap();
+
+        let sleep = unsafe { &*req };
+
+        if sleep.seconds < 0 || sleep.nanoseconds < 0 || sleep.nanoseconds > 999999999 {
+            return Err(SysErr::Raw(EINVAL));
+        }
+
+        info!("sleeping for {:#?}", sleep);
+
+        if !rem.is_null() {
+            unsafe { *rem = zeroed() }
+        }
+
+        Timespec::nanosleep(sleep)
+    }
+
     fn sys_sigprocmask(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         // Get arguments.
         let how: i32 = i.args[0].try_into().unwrap();
@@ -293,19 +343,24 @@ impl VProc {
         let act: *const SignalAct = i.args[1].into();
         let oact: *mut SignalAct = i.args[2].into();
 
+        // if sig == 0 || sig > SIG_MAXSIG {
+        //     return Err(SysErr::Raw(EINVAL));
+        // }
+        // let sig = NonZeroI32::new(sig).unwrap();
+
         // Save the old actions.
         let mut acts = self.sigacts.write();
 
         if !oact.is_null() {
             let handler = acts.handler(sig);
-            let flags = acts.signal_flags(sig);
             let mask = acts.catchmask(sig);
+            let flags = acts.signal_flags(sig);
             let old_act = SignalAct {
                 handler: handler,
+                // TODO: return proper flags
                 flags: flags,
                 mask: mask,
             };
-
             unsafe {
                 *oact = old_act;
             }
@@ -341,7 +396,7 @@ impl VProc {
             acts.set_modern(sig);
 
             if flags.intersects(SignalFlags::SA_RESTART) {
-                todo!("sys_sigaction with act.flags & 0x2 != 0");
+                acts.remove_interrupt(sig);
             } else {
                 acts.set_interupt(sig);
             }
@@ -501,6 +556,44 @@ impl VProc {
         Ok(SysOut::ZERO)
     }
 
+    fn sys_thr_get_name(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let tid: i32 = i.args[0].try_into().unwrap();
+        let name: *mut c_char = i.args[1].into();
+
+        info!("sys_thr_get_name({:#x}, {:#x})", tid, name as usize);
+
+        let threads = self.threads.read();
+
+        let thr = threads.iter().find(|t| t.id().get() == tid);
+
+        if name.is_null() {
+            return Err(SysErr::Raw(EFAULT));
+        }
+
+        match thr {
+            Some(td) => {
+                let thread_name = td.name().to_owned().unwrap_or("".into());
+                unsafe {
+                    name.copy_from_nonoverlapping(thread_name.as_ptr().cast(), thread_name.len());
+                    *name.add(thread_name.len()) = 0;
+                }
+            }
+            None => {
+                let td = VThread::current().unwrap();
+                if !td.cred().is_system() {
+                    return Err(SysErr::Raw(ESRCH));
+                }
+
+                todo!(
+                    "sys_thr_get_name with tid {:#x} not belonging to the process",
+                    tid
+                );
+            }
+        }
+
+        Ok(SysOut::ZERO)
+    }
+
     fn sys_rtprio_thread(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let function: RtpFunction = TryInto::<i32>::try_into(i.args[0]).unwrap().try_into()?;
         let lwpid: i32 = i.args[1].try_into().unwrap();
@@ -600,7 +693,10 @@ impl VProc {
         let td = match which {
             CpuWhich::Tid => {
                 if id == -1 {
-                    todo!("cpuset_which with id = -1");
+                    info!("cpuset_which with id = -1");
+                    let td = VThread::current().unwrap();
+
+                    Some(td.clone())
                 } else {
                     let threads = self.threads.read();
                     let td = threads
