@@ -71,6 +71,10 @@ impl RegMgr {
                 self.decode_key(v1, v2, td.cred(), 1)
                     .and_then(|k| todo!("regmgr_call({op}) with matched key = {k}"))
             }
+            0x1b => {
+                warn!("stubbed regmgr_call(0x1b)");
+                return Ok(SysOut::ZERO);
+            }
             0x27 | 0x40.. => Err(RegError::V800d0219),
             v => todo!("regmgr_call({v})"),
         };
@@ -111,11 +115,15 @@ impl RegMgr {
             todo!("regmgr_call with multiplier ^ 0x6b > 12");
         }
 
-        let x = e ^ SBOX1[i] as i32;
+        let x = e ^ SBOX1[SBOX1.len() - 1 - i] as i32;
         let sbox = if x == 0x19 {
             &SBOX2
         } else {
-            todo!("regmgr_call with x != 0x19");
+            if x != 0x72 {
+                todo!("regmgr_call with x != 0x19 && x != 0x72: {:#x}", x)
+            } else {
+                &SBOX1
+            }
         };
 
         // Construct the key.
@@ -135,8 +143,18 @@ impl RegMgr {
         };
 
         if v3 == 1 {
-            todo!("decode regmgr_call request with v3 = 1");
-        } else if cred.is_nongame() {
+            if cred.is_nongame() && entry.unk3 & 0x10 == 0 {
+                return Err(RegError::V800d0216);
+            }
+            if entry.unk3 & 1 == 0 {
+                return Err(RegError::V800d0214);
+            }
+            if (!(entry.unk3 >> 12) & web) != 0 {
+                return Err(RegError::V800d021f);
+            }
+        }
+
+        if cred.is_nongame() {
             todo!("decode regmgr_call request with non-game cred");
         } else if (entry.unk3 & 2) == 0 {
             Err(RegError::V800d0214)
@@ -372,6 +390,7 @@ pub enum RegError {
     V800d0207,
     V800d0208,
     V800d0214,
+    V800d0216,
     V800d0219,
     V800d021f,
 }
@@ -385,6 +404,7 @@ impl RegError {
             Self::V800d0207 => 0x800d0207u32 as i32,
             Self::V800d0208 => 0x800d0208u32 as i32,
             Self::V800d0214 => 0x800d0214u32 as i32,
+            Self::V800d0216 => 0x800d0216u32 as i32,
             Self::V800d0219 => 0x800d0219u32 as i32,
             Self::V800d021f => 0x800d021fu32 as i32,
         }
@@ -411,8 +431,8 @@ struct RegUnk6 {
     unk4: u32,
 }
 
-const SBOX1: [u8; 13] = [
-    0x8c, 0x4c, 0xa4, 0xff, 0x7b, 0xf5, 0xee, 0x63, 0x5a, 0x23, 0x70, 0x9a, 0x03,
+const SBOX1: [u8; 16] = [
+    0x68, 0xe8, 0x98, 0x03, 0x9a, 0x70, 0x23, 0x5a, 0x63, 0xee, 0xf5, 0x7b, 0xff, 0xa4, 0x4c, 0x8c,
 ];
 
 const SBOX2: [u8; 16] = [

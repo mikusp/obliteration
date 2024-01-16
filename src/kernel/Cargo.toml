@@ -28,6 +28,8 @@ sysinfo = { version = "0.30.0", default-features = false }
 termcolor = "1.2.0"
 thiserror = "1.0"
 tls = { path = "../tls" }
+proc-maps = "0.3.2"
+human_bytes = "0.4.3"
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.52"

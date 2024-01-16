@@ -5,7 +5,7 @@ mod entry;
 /// An implementation of `sys/kern/orbis_idt.c`.
 #[derive(Debug)]
 pub struct Idt<T> {
-    sets: Vec<[Option<Entry<T>>; 0x80]>,
+    sets: Vec<[Option<Entry<T>>; 0x200]>,
     next: usize,
     limit: usize,
 }
@@ -34,7 +34,7 @@ impl<T> Idt<T> {
     {
         // Allocate a new set if necessary.
         let id = self.next;
-        let set = id / 0x80;
+        let set = id / 0x200;
 
         while set >= self.sets.len() {
             todo!("id_alloc with entries span across the first set");
@@ -42,7 +42,7 @@ impl<T> Idt<T> {
 
         // Get the entry.
         let set = &mut self.sets[set];
-        let entry = &mut set[id % 0x80];
+        let entry = &mut set[id % 0x200];
 
         assert!(entry.is_none());
 
@@ -62,8 +62,8 @@ impl<T> Idt<T> {
         }
 
         let i = id & 0x1fff;
-        let set = self.sets.get_mut(i / 0x80)?;
-        let entry = set[i % 0x80].as_mut()?;
+        let set = self.sets.get_mut(i / 0x200)?;
+        let entry = set[i % 0x200].as_mut()?;
 
         if let Some(ty) = ty {
             if entry.ty() != ty {
@@ -72,5 +72,38 @@ impl<T> Idt<T> {
         }
 
         Some(entry)
+    }
+
+    /// See `id_rlock` on the PS4 for a reference.
+    pub fn get(&self, id: usize, ty: Option<u16>) -> Option<&Entry<T>> {
+        if id >= 0x10000 {
+            return None;
+        }
+
+        let i = id & 0x1fff;
+        let set = self.sets.get(i / 0x200);
+        let entry: Option<&Entry<T>> = set.and_then(|x| x[i % 0x200].as_ref());
+
+        if entry.map(|x| x.ty()) != ty {
+            return None;
+        }
+
+        entry
+    }
+
+    pub fn delete(&mut self, id: usize, ty: Option<u16>) -> Option<()> {
+        let i = id & 0x1fff;
+        let set = self.sets.get_mut(i / 0x200);
+        let entry = set.and_then(|x| {
+            let old = x[i % 0x200].as_ref();
+            if old.map(|x| x.ty()) == ty {
+                x[i % 0x200] = None;
+                Some(())
+            } else {
+                None
+            }
+        });
+
+        entry
     }
 }

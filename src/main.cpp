@@ -12,8 +12,16 @@
 #include <sys/resource.h>
 #endif
 
+#if defined(__linux__) && !defined(NDEBUG)
+#include <sys/personality.h>
+#endif
+
 int main(int argc, char *argv[])
 {
+#if defined(__linux__) && !defined(NDEBUG)
+    // personality(ADDR_NO_RANDOMIZE);
+#endif
+
     // Setup application.
     QCoreApplication::setOrganizationName("OBHQ");
     QCoreApplication::setApplicationName("Obliteration");

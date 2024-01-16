@@ -9,23 +9,31 @@ pub use self::vnode::*;
 
 use self::host::HostFs;
 use crate::errno::{Errno, EBADF, EBUSY, EINVAL, ENAMETOOLONG, ENODEV, ENOENT};
+use crate::error;
+use crate::fs::host::MountSource::{self, Bind, Host};
 use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Privilege, Ucred};
+use crate::warn;
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup};
 use macros::vpath;
 use param::Param;
 use std::any::Any;
+use std::backtrace::Backtrace;
+use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::io::{Error, Seek, SeekFrom};
+use std::mem;
 use std::num::{NonZeroI32, TryFromIntError};
+use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use thiserror::Error;
 
-mod dev;
+pub mod dev;
 mod dirent;
 mod file;
 mod host;
@@ -42,6 +50,41 @@ pub struct Fs {
     mounts: Gutex<Mounts>,   // mountlist
     root: Gutex<Arc<Vnode>>, // rootvnode
     kern: Arc<Ucred>,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TimeSpec {
+    sec: i64,
+    nsec: i64,
+}
+
+#[repr(C)]
+pub struct Stat {
+    dev: i32,
+    ino: u32,
+    pub mode: u16,
+    nlink: u16,
+    uid: u32,
+    gid: u32,
+    rdev: i32,
+    atime: TimeSpec,
+    mtime: TimeSpec,
+    ctime: TimeSpec,
+    pub size: i64,
+    block_count: i64,
+    pub block_size: u32,
+    flags: u32,
+    gen: u32,
+    _spare: i32,
+    birthtime: TimeSpec,
+}
+
+impl Stat {
+    /// This is what would happen when calling `bzero` on a `stat` structure.
+    pub fn zeroed() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
 }
 
 impl Fs {
@@ -132,11 +175,15 @@ impl Fs {
         }
 
         // Install syscall handlers.
+        sys.register(3, &fs, Self::sys_read);
         sys.register(4, &fs, Self::sys_write);
         sys.register(5, &fs, Self::sys_open);
         sys.register(6, &fs, Self::sys_close);
         sys.register(54, &fs, Self::sys_ioctl);
         sys.register(56, &fs, Self::sys_revoke);
+        sys.register(121, &fs, Self::sys_writev);
+        sys.register(189, &fs, Self::sys_fstat);
+        sys.register(478, &fs, Self::sys_lseek);
 
         Ok(fs)
     }
@@ -153,7 +200,41 @@ impl Fs {
     }
 
     pub fn open<P: AsRef<VPath>>(&self, path: P, td: Option<&VThread>) -> Result<VFile, OpenError> {
-        todo!()
+        // let bt = Backtrace::force_capture();
+        // info!("{bt:?}");
+        // let fp = path.as_ref();
+
+        // info!("Opening {fp} on thread.");
+        // let m = self.mounts.read();
+        // let mm = m.deref();
+        // info!("mounts {mm:?}");
+
+        // let root = self.mounts.read().root().clone();
+        // let data = root.data().cloned();
+        // let host = data.unwrap().downcast::<HostFs>().unwrap().app().clone();
+        // // info!("data {data:?}");
+        // let selfApp = self.app();
+        // let root1 = self.root();
+        // info!("host {host:?}");
+        // info!("self app {selfApp:?}");
+        // info!("root {root1:?}");
+
+        let f = path.as_ref().as_str().to_owned();
+
+        let file = self.lookup(path, td);
+
+        match file {
+            Err(err) => {
+                info!("not found {:?}", f);
+                Err(OpenError::NotFound)
+            }
+            Ok(vn) => Ok(VFile::new(
+                VFileType::Vnode(vn.clone()),
+                vn,
+                &DEFAULT_VFILEOPS,
+            )),
+        }
+        // todo!("open");
     }
 
     /// This method will **not** follow the last component if it is a mount point or a link.
@@ -168,11 +249,106 @@ impl Fs {
         // 2. namei rely on mutating the nameidata structure, which contribute to its complication.
         //
         // So we decided to implement our own lookup algorithm.
-        let path = path.as_ref();
+        let mut path = path.as_ref();
         let mut root = match td {
             Some(td) => td.proc().files().root(),
             None => self.root(),
         };
+
+        let rootMount = self.mounts.read().root().clone();
+        let host = rootMount.data().clone().downcast::<HostFs>();
+
+        let mut hostMountPoint: Option<MountSource> = None;
+
+        if let Ok(ref temp) = host {
+            loop {
+                match hostMountPoint {
+                    None => {
+                        for (k, v) in temp.maps().into_iter() {
+                            if path.starts_with(k.as_str()) {
+                                match v {
+                                    Bind(vpath) => {
+                                        let vp = path.replace(k.as_str(), &vpath);
+                                        hostMountPoint = Some(Bind(VPathBuf::from(
+                                            VPath::new(vp.as_str()).unwrap(),
+                                        )))
+                                    }
+                                    Host(hpath) => {
+                                        // info!("reached host {hpath:?}");
+                                        let mut pb = PathBuf::new();
+                                        for (_, i) in hpath.components().enumerate() {
+                                            pb.push(i);
+                                        }
+                                        let rest = path.strip_prefix(k.as_str()).unwrap();
+                                        for i in rest.split('/') {
+                                            pb.push(i);
+                                        }
+                                        // info!("created path {pb:?}");
+                                        hostMountPoint = Some(Host(pb));
+                                        // hostMountPoint = Some(Host(PathBuf::from(
+                                        //     VPath::new(
+                                        //         path.replace(k.as_str(), hpath.to_str().unwrap())
+                                        //             .as_str(),
+                                        //     )
+                                        //     .unwrap(),
+                                        // )))
+                                    }
+                                }
+                                break;
+                            }
+                            // if hostMountPoint.is_none() {
+                            //     todo!("path {path} does not conform to any mountsources");
+                            // }
+                        }
+                    }
+                    Some(Bind(ref vpath)) => {
+                        for (k, v) in temp.maps().into_iter() {
+                            if vpath.starts_with(k.as_str()) {
+                                match v {
+                                    Bind(vpath) => {
+                                        let vp = path.replace(k.as_str(), &vpath);
+                                        hostMountPoint = Some(Bind(VPathBuf::from(
+                                            VPath::new(vp.as_str()).unwrap(),
+                                        )))
+                                    }
+                                    Host(hpath) => {
+                                        // info!("reached host {hpath:?}");
+                                        let mut pb = PathBuf::new();
+                                        for (_, i) in hpath.components().enumerate() {
+                                            pb.push(i);
+                                        }
+                                        let rest = path.strip_prefix(k.as_str()).unwrap();
+                                        for i in rest.split('/') {
+                                            pb.push(i);
+                                        }
+                                        // info!("created path {pb:?}");
+                                        hostMountPoint = Some(Host(pb));
+                                        // hostMountPoint = Some(Host(PathBuf::from(
+                                        //     VPath::new(
+                                        //         path.replace(k.as_str(), hpath.to_str().unwrap())
+                                        //             .as_str(),
+                                        //     )
+                                        //     .unwrap(),
+                                        // )))
+                                    }
+                                }
+                                break;
+                            }
+                            // if hostMountPoint.is_none() {
+                            //     todo!("path {path} does not conform to any mountsources");
+                            // }
+                        }
+                    }
+                    Some(Host(ref v)) => break,
+                }
+            }
+
+            // match hostMountPoint {
+            //     Some(Bind(ref foo)) => info!("final {foo:?}"),
+            //     Some(Host(ref foo)) => info!("final2 {foo:?}"),
+            //     None => todo!("empty path"),
+            // }
+        }
 
         // Get starting point.
         let mut vn = if path.is_absolute() {
@@ -203,6 +379,7 @@ impl Fs {
             None => drop(item),
         }
 
+        info!("walking on path {path}");
         // Walk on path component.
         for (i, com) in path.components().enumerate() {
             // TODO: Handle link.
@@ -228,6 +405,7 @@ impl Fs {
                     }
                 }
                 VnodeType::Character => return Err(LookupError::NotFound),
+                VnodeType::RegularFile => break,
             }
 
             // Prevent ".." on root.
@@ -239,6 +417,8 @@ impl Fs {
             vn = match vn.lookup(td, com) {
                 Ok(v) => v,
                 Err(e) => {
+                    println!("{}", Backtrace::force_capture());
+                    error!("{e:?}");
                     if e.errno() == ENOENT {
                         return Err(LookupError::NotFound);
                     } else {
@@ -255,6 +435,19 @@ impl Fs {
         // TODO: Implement this.
     }
 
+    fn sys_read(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let ptr: *mut u8 = i.args[1].into();
+        let len: usize = i.args[2].try_into().unwrap();
+
+        let td = VThread::current().unwrap();
+        let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+        let buf = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        let read = file.read(buf, Some(&td))?;
+
+        Ok(read.into())
+    }
+
     fn sys_write(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
         let fd: i32 = i.args[0].try_into().unwrap();
         let ptr: *const u8 = i.args[1].into();
@@ -264,18 +457,135 @@ impl Fs {
             return Err(SysErr::Raw(EINVAL));
         }
 
+        if fd == 1 || fd == 2 {
+            let buf = unsafe { std::slice::from_raw_parts(ptr, len) };
+            eprint!("{}", String::from_utf8(buf.to_vec()).unwrap());
+            Ok(buf.len().into())
+        } else {
+            let td = VThread::current().unwrap();
+            let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+            let buf = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let written = file.write(buf, Some(&td))?;
+
+            Ok(written.into())
+        }
+    }
+
+    fn sys_writev(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let ptr: *const libc::iovec = i.args[1].into();
+        let len: usize = i.args[2].try_into().unwrap();
+
         let td = VThread::current().unwrap();
         let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
-        let buf = unsafe { std::slice::from_raw_parts(ptr, len) };
-        let written = file.write(buf, Some(&td))?;
+        let mut written = 0;
+        for i in 0..len - 1 {
+            let buf: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    ptr.offset(i.try_into().unwrap()).read().iov_base as *const u8,
+                    ptr.offset(i.try_into().unwrap()).read().iov_len,
+                )
+            };
+            written = written + file.write(buf as _, Some(&td))?;
+        }
 
         Ok(written.into())
+    }
+
+    fn sys_fstat(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let stat_out: *mut Stat = i.args[1].into();
+
+        let td = VThread::current().unwrap();
+
+        let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+
+        info!("sys_fstat({:?}, {:?})", fd, stat_out);
+
+        unsafe {
+            let p = libc::malloc(std::mem::size_of::<libc::stat>());
+
+            let foo = (DEFAULT_VFILEOPS.stat)(
+                &file,
+                std::slice::from_raw_parts_mut(p.cast(), mem::size_of::<libc::stat>()),
+                None,
+            );
+
+            let ss: libc::stat = *(p as *mut libc::stat);
+
+            let s = Stat {
+                dev: ss.st_dev.try_into().unwrap(),
+                ino: ss.st_ino.try_into().unwrap(),
+                mode: ss.st_mode.try_into().unwrap(),
+                nlink: ss.st_nlink.try_into().unwrap(),
+                uid: ss.st_uid,
+                gid: ss.st_gid,
+                rdev: ss.st_rdev.try_into().unwrap(),
+                atime: TimeSpec {
+                    sec: ss.st_atime,
+                    nsec: 0,
+                },
+                mtime: TimeSpec {
+                    sec: ss.st_mtime,
+                    nsec: 0,
+                },
+                ctime: TimeSpec {
+                    sec: ss.st_ctime,
+                    nsec: 0,
+                },
+                size: ss.st_size,
+                block_count: ss.st_blocks,
+                block_size: ss.st_blksize.try_into().unwrap(),
+                flags: 0,
+                gen: 0,
+                _spare: 0,
+                birthtime: TimeSpec { sec: 0, nsec: 0 },
+            };
+
+            *stat_out = s;
+
+            Ok(SysOut::ZERO)
+        }
+    }
+
+    fn sys_lseek(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let off: i64 = i.args[1].try_into().unwrap();
+        let whence: i32 = i.args[2].try_into().unwrap();
+
+        info!("sys_lseek({:?}, {:?}, {:?})", fd, off, whence);
+
+        let td = VThread::current().unwrap();
+        let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+
+        let pos = match whence {
+            libc::SEEK_SET => SeekFrom::Start(off as u64),
+            libc::SEEK_CUR => SeekFrom::Current(off),
+            libc::SEEK_END => SeekFrom::End(off),
+            _ => todo!(),
+        };
+
+        let foo = (DEFAULT_VFILEOPS.seek)(&file, pos, None);
+
+        match foo {
+            Ok(ret) => Ok(SysOut::from(ret as usize)),
+            Err(err) => todo!(), // Err(SysErr::from(err.raw_os_error().unwrap())),
+        }
+
+        // if ret < 0 {
+        //     Err(SysErr::Raw(unsafe {
+        //         NonZeroI32::new_unchecked(Error::last_os_error().raw_os_error().unwrap())
+        //     }))
+        // } else {
+        //     Ok(SysOut::from(ret as i32))
+        // }
     }
 
     fn sys_open(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
         // Get arguments.
         let path = unsafe { i.args[0].to_path()?.unwrap() };
         let flags: OpenFlags = i.args[1].try_into().unwrap();
+        warn!("sys_open() {:?} {:?} {:?}", path, flags.0, i.args);
         let mode: u32 = i.args[2].try_into().unwrap();
 
         // Check flags.
@@ -295,12 +605,12 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            // todo!("open({path}) with flags & O_TRUNC");
         } else if mode != 0 {
             todo!("open({path}, {flags}) with mode = {mode}");
         }
 
-        info!("Opening {path} with flags = {flags}.");
+        // info!("Opening {path} with flags = {flags}.");
 
         // Lookup file.
         let td = VThread::current().unwrap();
@@ -320,7 +630,7 @@ impl Fs {
         let td = VThread::current().unwrap();
         let fd: i32 = i.args[0].try_into().unwrap();
 
-        info!("Closing fd {fd}.");
+        // info!("Closing fd {fd}.");
 
         td.proc().files().free(fd)?;
 
@@ -337,6 +647,25 @@ impl Fs {
         let com: IoCmd = i.args[1].try_into()?;
         let data_arg: *mut u8 = i.args[2].into();
 
+        info!(
+            "sys_ioctl({}, {}, {:#x}, {:#x}, {}, {})",
+            fd,
+            com,
+            data_arg as usize,
+            com.size(),
+            com.is_in(),
+            com.is_out()
+        );
+
+        if fd == 666 {
+            info!("spoofed ioctl for fd 666");
+            return Ok(0.into());
+        }
+        if com == IoCmd::try_from_raw(0xc020a801).unwrap() {
+            info!("spoofed ioctl for cmd 0xc020a801");
+            return Ok(0.into());
+        }
+
         let size: usize = com.size();
         let mut vec = vec![0u8; size];
 
@@ -352,7 +681,9 @@ impl Fs {
         };
 
         if com.is_in() {
-            todo!("ioctl with IOC_IN & != 0");
+            unsafe {
+                std::ptr::copy_nonoverlapping(data_arg, data.as_mut_ptr(), size);
+            }
         } else if com.is_out() {
             data.fill(0);
         }
@@ -369,7 +700,7 @@ impl Fs {
         }
 
         // Execute the operation.
-        info!("Executing ioctl({com}) on file descriptor {fd}.");
+        // info!("Executing ioctl({com}) on file descriptor {fd}.");
 
         match com {
             UNK_COM1 => todo!("ioctl with com = 0x20006601"),
@@ -381,7 +712,7 @@ impl Fs {
 
         file.ioctl(com, data, Some(&td))?;
 
-        if com.is_void() {
+        if com.is_void() || com.is_out() {
             unsafe {
                 std::ptr::copy_nonoverlapping(data.as_ptr(), data_arg, size);
             }
@@ -401,11 +732,11 @@ impl Fs {
         td.priv_check(Privilege::SCE683)?;
 
         // TODO: Check vnode::v_rdev.
-        let vn = self.lookup(path, Some(&td))?;
+        // let vn = self.lookup(path, Some(&td))?;
 
-        if !vn.is_character() {
-            return Err(SysErr::Raw(EINVAL));
-        }
+        // if !vn.is_character() {
+        //     return Err(SysErr::Raw(EINVAL));
+        // }
 
         // TODO: It seems like the initial ucred of the process is either root or has PRIV_VFS_ADMIN
         // privilege.
@@ -642,11 +973,16 @@ impl Errno for MountError {
 
 /// Represents an error when [`Fs::open()`] was failed.
 #[derive(Debug, Error)]
-pub enum OpenError {}
+pub enum OpenError {
+    #[error("no such file or directory")]
+    NotFound,
+}
 
 impl Errno for OpenError {
     fn errno(&self) -> NonZeroI32 {
-        todo!()
+        match self {
+            Self::NotFound => ENOENT,
+        }
     }
 }
 

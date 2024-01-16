@@ -7,7 +7,7 @@ pub struct SignalActs {
     handler: [usize; SIG_MAXSIG as usize],       // ps_sigact
     catchmask: [SignalSet; SIG_MAXSIG as usize], // ps_catchmask
     stack: SignalSet,                            // ps_sigonstack
-    interupt: SignalSet,                         // ps_sigintr
+    interrupt: SignalSet,                        // ps_sigintr
     reset: SignalSet,                            // ps_sigreset
     nodefer: SignalSet,                          // ps_signodefer
     modern: SignalSet,                           // ps_siginfo
@@ -21,7 +21,7 @@ impl SignalActs {
             handler: [0; SIG_MAXSIG as usize],
             catchmask: [SignalSet::default(); SIG_MAXSIG as usize],
             stack: SignalSet::default(),
-            interupt: SignalSet::default(),
+            interrupt: SignalSet::default(),
             reset: SignalSet::default(),
             nodefer: SignalSet::default(),
             modern: SignalSet::default(),
@@ -38,6 +38,10 @@ impl SignalActs {
         self.handler[(sig.get() - 1) as usize] = h;
     }
 
+    pub fn catchmask(&self, sig: NonZeroI32) -> SignalSet {
+        self.catchmask[(sig.get() - 1) as usize]
+    }
+
     pub fn set_catchmask(&mut self, sig: NonZeroI32, mask: SignalSet) {
         self.catchmask[(sig.get() - 1) as usize] = mask;
     }
@@ -47,7 +51,11 @@ impl SignalActs {
     }
 
     pub fn set_interupt(&mut self, sig: NonZeroI32) {
-        self.interupt.add(sig);
+        self.interrupt.add(sig);
+    }
+
+    pub fn remove_interrupt(&mut self, sig: NonZeroI32) {
+        self.interrupt.remove(sig);
     }
 
     pub fn remove_reset(&mut self, sig: NonZeroI32) {

@@ -6,6 +6,7 @@ use crate::errno::{
 use crate::memory::MemoryManager;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::warn;
 use std::any::Any;
 use std::cmp::min;
 use std::ptr::null_mut;
@@ -82,6 +83,9 @@ impl Sysctl {
     pub const KERN_PROC: i32 = 14;
     pub const KERN_USRSTACK: i32 = 33;
     pub const KERN_ARND: i32 = 37;
+    pub const KERN_SDKVERSION: i32 = 38;
+    pub const KERN_CPUMODE: i32 = 41;
+    pub const KERN_RNGPSEUDO: i32 = 47;
     pub const KERN_PROC_APPINFO: i32 = 35;
     pub const KERN_PROC_SANITIZER: i32 = 41;
     pub const KERN_PROC_PTC: i32 = 43;
@@ -90,6 +94,10 @@ impl Sysctl {
     pub const VM_PS4DEV: i32 = 1;
     pub const VM_PS4DEV_TRCMEM_TOTAL: i32 = 571;
     pub const VM_PS4DEV_TRCMEM_AVAIL: i32 = 572;
+
+    pub const VM_BUDGETS: i32 = 313;
+    pub const VM_BUDGETS_MLOCK_AVAIL: i32 = 314;
+    pub const VM_BUDGETS_MLOCK_TOTAL: i32 = 315;
 
     pub const HW_PAGESIZE: i32 = 7;
 
@@ -247,6 +255,10 @@ impl Sysctl {
         }
 
         // TODO: Return ENOENT when we have implemented all of OIDs.
+        if name == [1, 14, 44, 1] {
+            return Ok(());
+        }
+
         todo!("sysctl {name:?}");
     }
 
@@ -434,6 +446,46 @@ impl Sysctl {
         req.write(&buf[..len])
     }
 
+    fn kern_cpumode(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        _req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        Ok(())
+    }
+
+    fn kern_rngpseudo(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        _req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        Ok(())
+    }
+
+    fn budgets_mlock_avail(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        _req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        Ok(())
+    }
+
+    fn budgets_mlock_total(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        _req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        Ok(())
+    }
+
     fn machdep_tsc_freq(
         &self,
         oid: &'static Oid,
@@ -609,10 +661,14 @@ type Handler = fn(&Sysctl, &'static Oid, &Arg, usize, &mut SysctlReq) -> Result<
 //     └─── (1.33) KERN_USRSTACK
 //     └─── ...
 //     └─── (1.37) KERN_ARANDOM
+//     └─── (1.38) KERN_SDKVERSION
 //     └─── ...
+//     └─── (1.41) KERN_CPUMODE
 //     └─── (1.42) KERN_SCHED
 //         └─── ...
 //         └─── (1.42.1252) KERN_SCHED_CPUSETSIZE
+//     └─── (1.47) KERN_RNGPSEUDO
+//     └─── ...
 //     └─── (1.1157)
 //         └─── ...
 //         └─── (1.1157.1162) KERN_SMP_CPUS
@@ -779,7 +835,7 @@ static KERN_USRSTACK: Oid = Oid {
 
 static KERN_ARANDOM: Oid = Oid {
     parent: &KERN_CHILDREN,
-    link: Some(&KERN_SCHED), // TODO: Use a proper value.
+    link: Some(&KERN_SDKVERSION), // TODO: Use a proper value.
     number: Sysctl::KERN_ARND,
     kind: Sysctl::CTLFLAG_RD
         | Sysctl::CTLFLAG_MPSAFE
@@ -791,6 +847,51 @@ static KERN_ARANDOM: Oid = Oid {
     handler: Some(Sysctl::kern_arandom),
     fmt: "",
     descr: "arc4rand",
+    enabled: true,
+};
+
+static KERN_SDKVERSION: Oid = Oid {
+    parent: &KERN_CHILDREN,
+    link: Some(&KERN_CPUMODE), // TODO: Use a proper value.
+    number: Sysctl::KERN_SDKVERSION,
+    kind: Sysctl::CTLFLAG_RD
+        | Sysctl::CTLFLAG_MPSAFE
+        | Sysctl::CTLFLAG_CAPRD
+        | Sysctl::CTLTYPE_UINT,
+    arg1: None,
+    arg2: 0x09008031, // TODO: check what that means
+    name: "sdk_version",
+    handler: Some(Sysctl::handle_int),
+    fmt: "IU",
+    descr: "SDK version",
+    enabled: true,
+};
+
+static KERN_CPUMODE: Oid = Oid {
+    parent: &KERN_CHILDREN,
+    link: Some(&KERN_RNGPSEUDO), // TODO: Use a proper value.
+    number: Sysctl::KERN_CPUMODE,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_INT,
+    arg1: None,
+    arg2: 0,
+    name: "cpumode",
+    handler: Some(Sysctl::kern_cpumode),
+    fmt: "I",
+    descr: "CPU mode",
+    enabled: true,
+};
+
+static KERN_RNGPSEUDO: Oid = Oid {
+    parent: &KERN_CHILDREN,
+    link: Some(&KERN_SCHED), // TODO: Use a proper value.
+    number: Sysctl::KERN_RNGPSEUDO,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_OPAQUE,
+    arg1: None,
+    arg2: 0,
+    name: "rng_pseudo",
+    handler: Some(Sysctl::kern_rngpseudo),
+    fmt: "",
+    descr: "RNGPseudo",
     enabled: true,
 };
 
@@ -878,7 +979,7 @@ static VM_CHILDREN: OidList = OidList {
 
 static VM_PS4DEV: Oid = Oid {
     parent: &VM_CHILDREN,
-    link: None, // TODO: Change to a proper value.
+    link: Some(&VM_BUDGETS), // TODO: Change to a proper value.
     number: Sysctl::VM_PS4DEV,
     kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_NODE,
     arg1: Some(&VM_PS4DEV_CHILDREN),
@@ -919,6 +1020,52 @@ static VM_PS4DEV_TRCMEM_AVAIL: Oid = Oid {
     handler: Some(Sysctl::handle_int),
     fmt: "IU",
     descr: "trace memory available",
+    enabled: true,
+};
+
+static VM_BUDGETS: Oid = Oid {
+    parent: &VM_CHILDREN,
+    link: None, // TODO: Change to a proper value.
+    number: Sysctl::VM_BUDGETS,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_WR | Sysctl::CTLTYPE_NODE,
+    arg1: Some(&VM_BUDGETS_CHILDREN),
+    arg2: 0,
+    name: "budgets",
+    handler: None,
+    fmt: "N",
+    descr: "VM budgets",
+    enabled: true,
+};
+
+static VM_BUDGETS_CHILDREN: OidList = OidList {
+    first: Some(&VM_BUDGETS_MLOCK_AVAIL), // TODO: use a proper value
+};
+
+static VM_BUDGETS_MLOCK_AVAIL: Oid = Oid {
+    parent: &VM_BUDGETS_CHILDREN,
+    link: Some(&VM_BUDGETS_MLOCK_TOTAL),
+    number: Sysctl::VM_BUDGETS_MLOCK_AVAIL,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_ULONG,
+    arg1: None,
+    arg2: 0,
+    name: "mlock_avail",
+    handler: Some(Sysctl::budgets_mlock_avail),
+    fmt: "L",
+    descr: "Available MLOCK budget",
+    enabled: true,
+};
+
+static VM_BUDGETS_MLOCK_TOTAL: Oid = Oid {
+    parent: &VM_BUDGETS_CHILDREN,
+    link: None,
+    number: Sysctl::VM_BUDGETS_MLOCK_TOTAL,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_ULONG,
+    arg1: None,
+    arg2: 0,
+    name: "mlock_total",
+    handler: Some(Sysctl::budgets_mlock_total),
+    fmt: "L",
+    descr: "Total MLOCK budget",
     enabled: true,
 };
 

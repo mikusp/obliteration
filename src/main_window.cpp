@@ -1,5 +1,6 @@
 #include "main_window.hpp"
 #include "app_data.hpp"
+#include "debugger.h"
 #include "game_models.hpp"
 #include "game_settings_dialog.hpp"
 #include "log_formatter.hpp"
@@ -8,6 +9,7 @@
 #include "progress_dialog.hpp"
 #include "settings.hpp"
 #include "string.hpp"
+#include "symbol_resolver.h"
 
 #include <QAction>
 #include <QApplication>
@@ -36,6 +38,8 @@
 MainWindow::MainWindow() :
     m_tab(nullptr),
     m_games(nullptr),
+    m_last_index(QModelIndex()),
+    m_restart_game(nullptr),
     m_log(nullptr),
     m_kernel(nullptr)
 {
@@ -53,15 +57,19 @@ MainWindow::MainWindow() :
     // File menu.
     auto fileMenu = menuBar()->addMenu("&File");
     auto installPkg = new QAction("&Install PKG", this);
+    m_restart_game = new QAction("&Restart game", this);
+    m_restart_game->setEnabled(false);
     auto openSystemFolder = new QAction("Open System &Folder", this);
     auto quit = new QAction("&Quit", this);
 
 #ifndef __APPLE__
     installPkg->setIcon(QIcon(svgPath + "archive-arrow-down-outline.svg"));
     openSystemFolder->setIcon(QIcon(svgPath + "folder-open-outline.svg"));
+    m_restart_game->setIcon(QIcon::fromTheme("view-refresh"));
 #endif
 
     connect(installPkg, &QAction::triggered, this, &MainWindow::installPkg);
+    connect(m_restart_game, &QAction::triggered, this, &MainWindow::restartGame);
     connect(openSystemFolder, &QAction::triggered, this, &MainWindow::openSystemFolder);
     connect(quit, &QAction::triggered, this, &MainWindow::close);
 
@@ -91,6 +99,8 @@ MainWindow::MainWindow() :
 
     fileBar->setMovable(false);
     fileBar->addAction(installPkg);
+    fileBar->addSeparator();
+    fileBar->addAction(m_restart_game);
 #endif
 
     // Central widget.
@@ -117,12 +127,14 @@ MainWindow::MainWindow() :
 
     connect(m_tab, &QTabWidget::currentChanged, this, &MainWindow::tabChanged);
 
+    m_symbol_resolver = new SymbolResolver(QDir(), QDir(), QDir(readSystemDirectorySetting()));
+
     // Setup log view.
     auto log = new QPlainTextEdit();
 
     log->setReadOnly(true);
     log->setLineWrapMode(QPlainTextEdit::NoWrap);
-    log->setMaximumBlockCount(10000);
+    // log->setMaximumBlockCount(10000);
 
 #ifdef _WIN32
     log->document()->setDefaultFont(QFont("Courier New", 10));
@@ -141,6 +153,10 @@ MainWindow::MainWindow() :
 
     // Show the window.
     restoreGeometry();
+
+    qDebug() << "debug";
+    qInfo() << "info";
+    qWarning() << "warn";
 }
 
 MainWindow::~MainWindow()
@@ -368,6 +384,14 @@ void MainWindow::installPkg()
     }
 }
 
+void MainWindow::restartGame() {
+    if (requireEmulatorStopped()) {
+        return;
+    }
+
+    startGame(m_last_index);
+}
+
 void MainWindow::openSystemFolder()
 {
     QString folderPath = readSystemDirectorySetting();
@@ -435,6 +459,11 @@ void MainWindow::requestGamesContextMenu(const QPoint &pos)
     }
 }
 
+void MainWindow::setLastGame(const QModelIndex &index) {
+    m_restart_game->setEnabled(true);
+    m_last_index = index;
+}
+
 void MainWindow::startGame(const QModelIndex &index)
 {
     if (requireEmulatorStopped()) {
@@ -444,6 +473,8 @@ void MainWindow::startGame(const QModelIndex &index)
     // Get target game.
     auto model = reinterpret_cast<GameListModel *>(m_games->model());
     auto game = model->get(index.row()); // Qt already guaranteed the index is valid.
+
+    setLastGame(index);
 
     // Clear previous log and switch to log view.
     m_log->reset();
@@ -495,6 +526,13 @@ void MainWindow::startGame(const QModelIndex &index)
     auto env = QProcessEnvironment::systemEnvironment();
 
     env.insert("TERM", "xterm");
+    env.insert("RUST_BACKTRACE", "1");
+
+    // link app0
+    qDebug() << "removing" << readSystemDirectorySetting().append("/app0");
+    QFile::remove(readSystemDirectorySetting().append("/app0"));
+    qDebug() << "link" << game->directory() << "to" << readSystemDirectorySetting().append("/app0");
+    QFile::link(game->directory(), readSystemDirectorySetting().append("/app0"));
 
     // Prepare kernel launching.
     m_kernel = new QProcess(this);
@@ -503,12 +541,28 @@ void MainWindow::startGame(const QModelIndex &index)
     m_kernel->setProcessEnvironment(env);
     m_kernel->setProcessChannelMode(QProcess::MergedChannels);
 
+    m_symbol_resolver->setGameDir(game->directory());
+
     connect(m_kernel, &QProcess::errorOccurred, this, &MainWindow::kernelError);
     connect(m_kernel, &QIODevice::readyRead, this, &MainWindow::kernelOutput);
+    connect(m_kernel, &QProcess::started, this, &MainWindow::kernelStarted);
     connect(m_kernel, &QProcess::finished, this, &MainWindow::kernelTerminated);
 
     // Launch kernel.
     m_kernel->start(QIODeviceBase::ReadOnly | QIODeviceBase::Text);
+}
+
+void MainWindow::kernelCrashed()
+{
+    //kernel crashed while it's traced, now find out where
+    kernelOutput();
+    auto button = QMessageBox::critical(this, "Error", "Closing the dialog will kill the kernel", QMessageBox::Close | QMessageBox::Ignore, QMessageBox::Close);
+    if (button == QMessageBox::Close)
+        killKernel();
+    else {
+        if (m_debugger)
+            m_debugger->detachZombie();
+    }
 }
 
 void MainWindow::kernelError(QProcess::ProcessError error)
@@ -553,6 +607,12 @@ void MainWindow::kernelOutput()
     }
 }
 
+void MainWindow::kernelStarted()
+{
+    m_debugger = new Debugger(m_kernel, m_symbol_resolver);
+    connect(m_debugger, &Debugger::kernelCrash, this, &MainWindow::kernelCrashed);
+}
+
 void MainWindow::kernelTerminated(int, QProcess::ExitStatus)
 {
     // Do nothing if we got QProcess::errorOccurred before this signal.
@@ -563,6 +623,9 @@ void MainWindow::kernelTerminated(int, QProcess::ExitStatus)
     kernelOutput();
 
     QMessageBox::critical(this, "Error", "The emulator kernel has stopped unexpectedly. Please take a look at the log and report this issue if possible.");
+
+    m_debugger->deleteLater();
+    m_debugger = nullptr;
 
     m_kernel->deleteLater();
     m_kernel = nullptr;
@@ -608,7 +671,12 @@ void MainWindow::killKernel()
     }
 
     // We need to disconnect all slots first otherwise the application will be freeze.
+    disconnect(m_debugger, nullptr, nullptr, nullptr);
     disconnect(m_kernel, nullptr, nullptr, nullptr);
+
+    m_debugger->detach();
+    m_debugger->deleteLater();
+    m_debugger = nullptr;
 
     m_kernel->kill();
     m_kernel->waitForFinished(-1);

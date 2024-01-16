@@ -1,10 +1,15 @@
 use super::{CpuMask, CpuSet, VProc, NEXT_ID};
+use crate::ee::{EntryArg, ExecutionEngine};
+use crate::fs::VFile;
 use crate::signal::SignalSet;
 use crate::ucred::{Privilege, PrivilegeError, Ucred};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
+use libc::c_void;
 use llt::{OsThread, SpawnError};
 use std::num::NonZeroI32;
+use std::pin::Pin;
+use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tls::{Local, Tls};
@@ -23,6 +28,7 @@ pub struct VThread {
     pcb: Gutex<Pcb>,             // td_pcb
     cpuset: CpuSet,              // td_cpuset
     name: Gutex<Option<String>>, // td_name
+    fpop: Gutex<Option<VFile>>,  // td_fpop
 }
 
 impl VThread {
@@ -43,6 +49,7 @@ impl VThread {
             }),
             cpuset: CpuSet::new(CpuMask::default()), // TODO: Same here.
             name: gg.spawn(None),                    // TODO: Same here
+            fpop: gg.spawn(None),
         }
     }
 
@@ -87,8 +94,26 @@ impl VThread {
         &self.cpuset
     }
 
+    pub fn name(&self) -> GutexReadGuard<'_, Option<String>> {
+        self.name.read()
+    }
+
     pub fn set_name(&self, name: Option<&str>) {
         *self.name.write() = name.map(|n| n.to_owned());
+        #[cfg(target_os = "linux")]
+        {
+            unsafe {
+                let ptr = match name {
+                    None => ptr::null(),
+                    Some(s) => s.as_ptr().cast(),
+                };
+                libc::pthread_setname_np(i32::from(self.id) as u64, ptr);
+            }
+        }
+    }
+
+    pub fn set_fpop(&self, file: Option<VFile>) {
+        *self.fpop.write() = file
     }
 
     /// An implementation of `priv_check`.
@@ -115,7 +140,6 @@ impl VThread {
         let proc = self.proc.clone();
         let td = Arc::new(self);
         let running = Running(td.clone());
-
         // Lock the list before spawn the thread to prevent race condition if the new thread run
         // too fast and found out they is not in our list.
         let mut threads = proc.threads.write();

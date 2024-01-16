@@ -65,6 +65,8 @@ impl<I: Read + Seek> Elf<I> {
             return Err(OpenError::ReadHeaderFailed(e));
         }
 
+        // println!("{:X?}", hdr);
+
         // Check if image is SELF.
         let (hdr, offset, self_data) = if hdr.starts_with(&SELF_MAGIC) {
             // Kyty also checking if Category = 0x01 & Program Type = 0x01 & Padding = 0x00.
@@ -121,6 +123,7 @@ impl<I: Read + Seek> Elf<I> {
             (hdr, 0, None)
         };
 
+        // println!("{:X?}", hdr);
         // Check ELF magic.
         if !hdr.starts_with(&[0x7f, 0x45, 0x4c, 0x46]) {
             return Err(OpenError::InvalidElfMagic);

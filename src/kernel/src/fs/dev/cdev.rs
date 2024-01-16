@@ -1,6 +1,6 @@
 use super::dirent::Dirent;
 use crate::errno::Errno;
-use crate::fs::{Mode, OpenFlags, VFile};
+use crate::fs::{IoCmd, Mode, OpenFlags, VFile};
 use crate::process::VThread;
 use crate::ucred::{Gid, Ucred, Uid};
 use bitflags::bitflags;
@@ -110,18 +110,25 @@ bitflags! {
 /// An implementation of `cdevsw` structure.
 #[derive(Debug)]
 pub struct CdevSw {
-    flags: DriverFlags,     // d_flags
-    open: Option<CdevOpen>, // d_open
-    fdopen: Option<CdevFd>, // d_fdopen
+    flags: DriverFlags,       // d_flags
+    open: Option<CdevOpen>,   // d_open
+    fdopen: Option<CdevFd>,   // d_fdopen
+    ioctl: Option<CdevIoctl>, // d_ioctl
 }
 
 impl CdevSw {
     /// See `prep_cdevsw` on the PS4 for a reference.
-    pub fn new(flags: DriverFlags, open: Option<CdevOpen>, fdopen: Option<CdevFd>) -> Self {
+    pub fn new(
+        flags: DriverFlags,
+        open: Option<CdevOpen>,
+        fdopen: Option<CdevFd>,
+        ioctl: Option<CdevIoctl>,
+    ) -> Self {
         Self {
             flags,
             open,
             fdopen,
+            ioctl,
         }
     }
 
@@ -136,16 +143,24 @@ impl CdevSw {
     pub fn fdopen(&self) -> Option<CdevFd> {
         self.fdopen
     }
+
+    pub fn ioctl(&self) -> Option<CdevIoctl> {
+        self.ioctl
+    }
 }
 
 bitflags! {
     /// Flags for [`CdevSw`].
     #[derive(Debug, Clone, Copy)]
     pub struct DriverFlags: u32 {
+        const D_TRACKCLOSE = 0x00080000;
         const D_NEEDMINOR = 0x00800000;
+        const D_INIT = 0x80000000;
     }
 }
 
 pub type CdevOpen = fn(&Arc<Cdev>, OpenFlags, i32, Option<&VThread>) -> Result<(), Box<dyn Errno>>;
 pub type CdevFd =
     fn(&Arc<Cdev>, OpenFlags, Option<&VThread>, Option<&mut VFile>) -> Result<(), Box<dyn Errno>>;
+pub type CdevIoctl =
+    fn(&Arc<Cdev>, IoCmd, &mut [u8], Option<&VThread>) -> Result<i64, Box<dyn Errno>>;

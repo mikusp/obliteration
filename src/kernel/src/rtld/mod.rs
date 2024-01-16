@@ -10,11 +10,15 @@ use crate::log::print;
 use crate::memory::{MemoryManager, MemoryUpdateError, MmapError, Protections};
 use crate::process::{VProc, VThread};
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::warn;
 use bitflags::bitflags;
 use elf::{DynamicFlags, Elf, FileType, ReadProgramError, Relocation, Symbol};
 use gmtx::{Gutex, GutexGroup};
+use libc::SIGSTOP;
 use sha1::{Digest, Sha1};
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::collections::LinkedList;
 use std::io::Write;
 use std::mem::{size_of, zeroed};
 use std::num::NonZeroI32;
@@ -61,9 +65,10 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         dump: Option<&Path>,
     ) -> Result<Arc<Self>, RuntimeLinkerError<E>> {
         // Get path to eboot.bin.
-        let mut path = fs.app().join("app0").unwrap();
+        // let mut path = fs.app().join("app0").unwrap();
+        // let mut path = fs.app().to_owned();
 
-        path.push("eboot.bin").unwrap();
+        let mut path = fs.app().join("eboot.bin").unwrap();
 
         // Get eboot.bin.
         let file = match fs.open(&path, None) {
@@ -151,6 +156,7 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
 
         sys.register(591, &ld, Self::sys_dynlib_dlsym);
         sys.register(592, &ld, Self::sys_dynlib_get_list);
+        sys.register(593, &ld, Self::sys_dynlib_get_info);
         sys.register(594, &ld, Self::sys_dynlib_load_prx);
         sys.register(596, &ld, Self::sys_dynlib_do_copy_relocations);
         sys.register(598, &ld, Self::sys_dynlib_get_proc_param);
@@ -159,6 +165,56 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         sys.register(649, &ld, Self::sys_dynlib_get_obj_member);
 
         Ok(ld)
+    }
+
+    pub fn init_libs(&self, md: &Arc<Module<E>>) -> () {
+        let list = self.list.read();
+        let mut deps = Vec::new();
+        // let mut to_init = Vec::new();
+        // for m in list.iter() {
+        for n in md.needed() {
+            if n.name != "libkernel.sprx" && n.name != "libkernel.prx" {
+                deps.push(n.name.to_owned())
+            }
+        }
+        //     if !m.flags().intersects(ModuleFlags::INIT_DONE) {
+        //         to_init.push(m);
+        //     }
+        // }
+
+        info!("processing {}", md.path().file_name().unwrap());
+
+        for dep in deps.iter() {
+            for m in list.iter() {
+                if m.names().contains(dep)
+                    && !m.flags().intersects(ModuleFlags::INIT_DONE)
+                    && m.init().is_some()
+                {
+                    let mut flags = m.flags_mut();
+                    info!("calling init for {}", m.path().file_name().unwrap());
+
+                    let offset = m.memory().addr() + m.memory().base() + m.init().unwrap();
+                    // unsafe {
+                    //     let fun = m.get_function(m.init().unwrap());
+                    //     fun.exec1::<()>(std::ptr::null());
+                    // }
+
+                    let fun_ptr = offset as *const ();
+                    let fun: extern "sysv64" fn(i64, i64, i64) =
+                        unsafe { std::mem::transmute(fun_ptr) };
+                    (fun)(0, 0, 0);
+
+                    *flags |= ModuleFlags::INIT_DONE;
+                    continue;
+                }
+            }
+            info!("dep {} left uninitialized", dep);
+        }
+
+        // info!("{:?}, {:?}", md.path().file_name().unwrap(), deps);
+
+        // for x in to_init.iter() {}
+        // info!("foo");
     }
 
     pub fn app(&self) -> &Arc<Module<E>> {
@@ -172,6 +228,51 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
     pub fn set_kernel(&self, md: Arc<Module<E>>) {
         *self.kernel.write() = Some(md);
     }
+
+    // pub fn load_needed_objects(&self, proc: &VProc, md: &mut Module<E>) -> Result<(), ()> {
+    //     for needed in md.needed() {
+    //         let obj = self.load(
+    //             proc,
+    //             unsafe { VPath::new_unchecked(needed.name.as_str()) },
+    //             LoadFlags::ZERO,
+    //             false,
+    //             false,
+    //         );
+
+    //         match obj {
+    //             Ok(module) => {
+    //                 // needed.module = Some(ModuleRef(module.clone()));
+    //                 self.init_dag(&module)
+    //             }
+    //             Err(err) => return Err(()),
+    //         }
+    //     }
+
+    //     return Ok(());
+    // }
+
+    // pub fn init_objects(&mut self) -> () {
+    //     let gg = GutexGroup::new();
+    //     let mut init_list = gg.spawn(vec![]);
+    //     let init_list_guard = init_list.get_mut();
+    //     for x in self.list.get_mut() {
+    //         if x.init_scanned || x.init_done {
+    //             continue;
+    //         }
+    //         // x.set_scanned(true);
+
+    //         for n in x.needed().iter_mut() {
+    //             if let Some(addr) = n.module.as_ref().and_then(|x| x.0.init()) {
+    //                 init_list_guard.push(addr);
+    //             }
+    //         }
+
+    //         if let Some(addr) = x.init() {
+    //             init_list_guard.push(addr);
+    //         }
+    //     }
+    //     ()
+    // }
 
     /// See `load_object`, `do_load_object` and `self_load_shared_object` on the PS4 for a
     /// reference.
@@ -281,6 +382,7 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
 
         // Add to list.
         let module = entry.data().clone().downcast::<Module<E>>().unwrap();
+        // Self::set_debug_flags(&module);
 
         list.push(module.clone());
 
@@ -300,9 +402,28 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
             return;
         }
 
+        // let mut donelist = HashSet::new();
+
         // Add the module itself as a first member of DAG.
         md.dag_static_mut().push(md.clone());
         md.dag_dynamic_mut().push(md.clone());
+
+        // for elem in md.dag_dynamic_mut().iter_mut() {
+        //     for needed in elem.needed() {
+        //         if needed.module.is_none() || !donelist.insert(needed.module.as_ref().unwrap()) {
+        //             continue;
+        //         }
+        //         needed
+        //             .module
+        //             .as_ref()
+        //             .unwrap()
+        //             .0
+        //             .dag_dynamic_mut()
+        //             .push(md.clone());
+        //         md.dag_static_mut()
+        //             .push(needed.module.as_ref().unwrap().0.clone())
+        //     }
+        // }
 
         // TODO: Apply the remaining logics from init_dag.
         *flags |= ModuleFlags::DAG_INITED;
@@ -398,12 +519,19 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
 
         // Get target module.
         let list = self.list.read();
+        let v = list.clone();
+        info!("looking for handle {} name {}", handle, name);
+        for m in v.iter() {
+            info!("id {} name {:?}", m.id(), m.names())
+        }
         let md = match list.iter().find(|m| m.id() == handle) {
             Some(v) => v,
             None => return Err(SysErr::Raw(ESRCH)),
         };
 
-        info!("Getting symbol '{}' from {}.", name, md.path());
+        let foo = md.path().file_name().unwrap();
+
+        info!("Getting symbol '{}' from {}.", name, foo);
 
         // Get resolving flags.
         let mut flags = ResolveFlags::UNK1;
@@ -417,6 +545,8 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
             Some(v) => v,
             None => return Err(SysErr::Raw(ESRCH)),
         };
+
+        info!("symbol {} addr is {:#x}", name, addr);
 
         unsafe { *out = addr };
         Ok(SysOut::ZERO)
@@ -450,6 +580,16 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         info!("Copied {} module IDs for dynamic linking.", list.len());
 
         Ok(SysOut::ZERO)
+    }
+
+    fn sys_dynlib_get_info(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let td = VThread::current().unwrap();
+
+        if self.app.file_info().is_none() {
+            return Err(SysErr::Raw(EPERM));
+        }
+
+        Ok(0.into())
     }
 
     fn sys_dynlib_load_prx(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -544,12 +684,16 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
             if unsafe { self.relocate(&md, &list, &resolver).is_err() } {
                 todo!("sys_dynlib_load_prx with location failed");
             }
+
+            // Self::set_debug_flags(&md);
         }
 
         // Print the module.
         let mut log = info!();
         writeln!(log, "Module {} is loaded with ID = {}.", name, md.id()).unwrap();
         md.print(log);
+
+        // self.init_libs(&md);
 
         // Set module ID.
         unsafe { *Into::<*mut u32>::into(i.args[2]) = md.id() };
@@ -797,6 +941,17 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
 
                     (Relocated::Tls((md, index)), value)
                 }
+                Relocation::R_X86_64_DTPOFF64 => {
+                    let md = match resolver.resolve_with_local(md, sym, symflags) {
+                        Some((md, _)) => md,
+                        None => continue,
+                    };
+
+                    let sym = md.symbol(sym).unwrap();
+                    let addr = sym.value().wrapping_add_signed(addend);
+
+                    (Relocated::Data((md, addr)), addr)
+                }
                 v => return Err(RelocateError::UnsupportedRela(md.path().to_owned(), v)),
             };
 
@@ -905,6 +1060,14 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
             None => return Err(SysErr::Raw(ESRCH)),
         };
 
+        warn!("{}", md.path().file_name().unwrap_or(""));
+
+        if md.names().contains(&"libSceUserService.prx".to_string()) {
+            unsafe {
+                // libc::kill(0, SIGSTOP);
+            }
+        }
+
         // Fill the info.
         let info = unsafe { &mut *info };
         let mem = md.memory();
@@ -919,10 +1082,21 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         info.datasize = mem.data_segment().len().try_into().unwrap();
         info.unk4 = 3;
         info.unk6 = 2;
-        info.refcount = Arc::strong_count(md).try_into().unwrap();
+        let mut mod_flags = md.flags_mut();
 
+        if !mod_flags.intersects(ModuleFlags::UNK5) {
+            info.init = md.init().map(|v| addr + v).unwrap_or(0);
+            info.fini = md.fini().map(|v| addr + v).unwrap_or(0);
+        }
+
+        if !mod_flags.intersects(ModuleFlags::INIT_DONE) {
+            info.refcount = 1; //Arc::strong_count(md).try_into().unwrap();
+        } else {
+            info.refcount = 2;
+            *mod_flags |= ModuleFlags::INIT_DONE;
+        }
         // Copy module name.
-        if flags & 2 == 0 || !md.flags().contains(ModuleFlags::UNK1) {
+        if flags & 2 == 0 || !mod_flags.contains(ModuleFlags::UNK1) {
             let name = md.path().file_name().unwrap();
 
             info.name[..name.len()].copy_from_slice(name.as_bytes());
@@ -932,7 +1106,7 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         // Set TLS information. Not sure if the tlsinit can be zero when the tlsinitsize is zero.
         // Let's keep the same behavior as the PS4 for now.
         info.tlsindex = if flags & 1 != 0 {
-            let flags = md.flags();
+            let flags = mod_flags;
             let mut upper = if flags.contains(ModuleFlags::UNK1) {
                 1
             } else {
@@ -960,10 +1134,10 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         info.tlsoffset = (*md.tls_offset()).try_into().unwrap();
 
         // Initialization and finalization functions.
-        if !md.flags().contains(ModuleFlags::UNK5) {
-            info.init = md.init().map(|v| addr + v).unwrap_or(0);
-            info.fini = md.fini().map(|v| addr + v).unwrap_or(0);
-        }
+        // if !mod_flags.intersects(ModuleFlags::UNK5) {
+        //     info.init = md.init().map(|v| addr + v).unwrap_or(0);
+        //     info.fini = md.fini().map(|v| addr + v).unwrap_or(0);
+        // }
 
         // Exception handling.
         if let Some(i) = md.eh_info() {
@@ -1029,6 +1203,24 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
 
         Ok(SysOut::ZERO)
     }
+
+    fn set_debug_flags(md: &Arc<Module<E>>) -> () {
+        let values = vec![
+            ("libkernel.prx", vec![(0x71280 as usize, 0xffffff)]),
+            ("libSceFios2.prx", vec![(0x17c520 as usize, 0x7fffffff)]),
+        ];
+
+        for (lib_name, fixes) in values.iter() {
+            if md.names().contains(&lib_name.to_string()) {
+                unsafe {
+                    for (offset, val) in fixes.iter() {
+                        let mem_addr = md.memory().addr() + md.memory().base() + offset;
+                        *(mem_addr as *mut std::ffi::c_int) = *val;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -1083,6 +1275,7 @@ bitflags! {
     /// Flags for [`RuntimeLinker::load()`].
     #[derive(Clone, Copy)]
     pub struct LoadFlags: u32 {
+        const ZERO = 0x00;
         const UNK2 = 0x01;
         const BIG_APP = 0x20;
         const UNK1 = 0x40;

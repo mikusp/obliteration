@@ -1,12 +1,14 @@
 use super::file::HostFile;
-use super::{get_vnode, GetVnodeError};
+use super::{get_vnode, GetVnodeError, ReadError, SeekError};
 use crate::errno::{Errno, EIO, ENOENT, ENOTDIR};
 use crate::fs::{
     Access, Mode, OpenFlags, VFile, Vnode, VnodeAttrs, VnodeType, VopVector, DEFAULT_VNODEOPS,
 };
+use crate::info;
 use crate::process::VThread;
 use crate::ucred::{Gid, Uid};
 use std::borrow::Cow;
+use std::io::SeekFrom;
 use std::num::NonZeroI32;
 use std::sync::Arc;
 use thiserror::Error;
@@ -18,6 +20,11 @@ pub static VNODE_OPS: VopVector = VopVector {
     getattr: Some(getattr),
     lookup: Some(lookup),
     open: Some(open),
+    read: Some(read),
+    write: None,
+    ioctl: None,
+    seek: Some(seek),
+    stat: Some(stat),
 };
 
 fn access(_: &Arc<Vnode>, _: Option<&VThread>, _: Access) -> Result<(), Box<dyn Errno>> {
@@ -36,6 +43,7 @@ fn getattr(vn: &Arc<Vnode>) -> Result<VnodeAttrs, Box<dyn Errno>> {
     // TODO: Check how the PS4 assign file permissions for exfatfs.
     let mode = match vn.ty() {
         VnodeType::Directory(_) => Mode::new(0o555).unwrap(),
+        VnodeType::RegularFile => Mode::new(0o644).unwrap(),
         VnodeType::Character => unreachable!(), // The character device should only be in the devfs.
     };
 
@@ -85,12 +93,40 @@ fn lookup(vn: &Arc<Vnode>, td: Option<&VThread>, name: &str) -> Result<Arc<Vnode
 }
 
 fn open(
-    _: &Arc<Vnode>,
-    _: Option<&VThread>,
-    _: OpenFlags,
-    _: Option<&mut VFile>,
+    vn: &Arc<Vnode>,
+    td: Option<&VThread>,
+    flags: OpenFlags,
+    file: Option<&mut VFile>,
 ) -> Result<(), Box<dyn Errno>> {
-    todo!()
+    info!("host open");
+
+    Ok(())
+}
+
+fn read(vn: &Arc<Vnode>, td: Option<&VThread>, buf: &mut [u8]) -> Result<usize, Box<dyn Errno>> {
+    let host = vn.data().downcast_ref::<HostFile>().unwrap();
+
+    match host.read(buf) {
+        Ok(read_bytes) => Ok(read_bytes),
+        Err(error) => Err(Box::new(ReadError::ReadFailed(error))),
+    }
+}
+
+fn seek(vn: &Arc<Vnode>, td: Option<&VThread>, pos: SeekFrom) -> Result<u64, Box<dyn Errno>> {
+    let host = vn.data().downcast_ref::<HostFile>().unwrap();
+
+    match host.seek(pos) {
+        Ok(new_pos) => Ok(new_pos),
+        Err(error) => Err(Box::new(SeekError::SeekFailed(error))),
+    }
+}
+
+fn stat(vn: &Arc<Vnode>, td: Option<&VThread>, buf: &mut [u8]) -> Result<u64, Box<dyn Errno>> {
+    let host = vn.data().downcast_ref::<HostFile>().unwrap();
+    match host.stat(buf) {
+        Ok(res) => Ok(res),
+        Err(error) => Err(Box::new(ReadError::ReadFailed(error))),
+    }
 }
 
 /// Represents an error when [`getattr()`] was failed.

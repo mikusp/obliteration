@@ -2,6 +2,7 @@ use self::file::HostFile;
 use self::vnode::VNODE_OPS;
 use super::{FsConfig, FsOps, Mount, MountFlags, VPathBuf, Vnode, VnodeType};
 use crate::errno::{Errno, EIO};
+use crate::info;
 use crate::ucred::Ucred;
 use gmtx::{Gutex, GutexGroup};
 use param::Param;
@@ -25,11 +26,16 @@ pub struct HostFs {
     root: PathBuf,
     app: Arc<VPathBuf>,
     actives: Gutex<HashMap<PathBuf, Weak<Vnode>>>,
+    maps: HashMap<VPathBuf, MountSource>,
 }
 
 impl HostFs {
     pub fn app(&self) -> &Arc<VPathBuf> {
         &self.app
+    }
+
+    pub fn maps(&self) -> &HashMap<VPathBuf, MountSource> {
+        &self.maps
     }
 }
 
@@ -111,7 +117,11 @@ pub fn mount(
         .try_into()
         .unwrap();
 
+    info!("app path {app}");
+
     map.insert(app.join("app0").unwrap(), MountSource::Bind(pfs));
+
+    info!("map {map:?}");
 
     // Set mount data.
     let gg = GutexGroup::new();
@@ -127,6 +137,7 @@ pub fn mount(
             root: system,
             app: Arc::new(app),
             actives: gg.spawn(HashMap::new()),
+            maps: map,
         },
     ))
 }
@@ -160,7 +171,7 @@ fn get_vnode(mnt: &Arc<Mount>, path: Option<&Path>) -> Result<Arc<Vnode>, GetVno
     let ty = match file.is_directory() {
         Ok(v) => match v {
             true => VnodeType::Directory(path == fs.root),
-            false => todo!(),
+            false => VnodeType::RegularFile,
         },
         Err(e) => return Err(GetVnodeError::GetFileTypeFailed(e)),
     };
@@ -176,7 +187,7 @@ fn get_vnode(mnt: &Arc<Mount>, path: Option<&Path>) -> Result<Arc<Vnode>, GetVno
 
 /// Source of mount point.
 #[derive(Debug)]
-enum MountSource {
+pub enum MountSource {
     Host(PathBuf),
     Bind(VPathBuf),
 }
@@ -192,6 +203,34 @@ impl Errno for MountError {
     fn errno(&self) -> NonZeroI32 {
         match self {
             Self::CreateDirectoryFailed(_, _) => EIO,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum ReadError {
+    #[error("read failed {0}")]
+    ReadFailed(std::io::Error),
+}
+
+impl Errno for ReadError {
+    fn errno(&self) -> NonZeroI32 {
+        match self {
+            Self::ReadFailed(_) => EIO,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum SeekError {
+    #[error("seek failed {0}")]
+    SeekFailed(std::io::Error),
+}
+
+impl Errno for SeekError {
+    fn errno(&self) -> NonZeroI32 {
+        match self {
+            Self::SeekFailed(_) => EIO,
         }
     }
 }

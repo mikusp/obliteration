@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.28)
+
 # CMake modules
 include(ExternalProject)
 
@@ -6,6 +8,7 @@ find_package(Qt6 COMPONENTS Widgets REQUIRED)
 find_package(Threads REQUIRED)
 
 # Setup LLVM target.
+set(ENV{LLVM_SYS_170_PREFIX} /usr/)
 set(LLVM_OPTS -DCMAKE_INSTALL_PREFIX:STRING=<INSTALL_DIR> -DLLVM_ENABLE_ZSTD:BOOL=OFF -DLLVM_APPEND_VC_REV:BOOL=OFF)
 
 if(WIN32)
@@ -81,7 +84,9 @@ add_executable(obliteration WIN32 MACOSX_BUNDLE
     settings.cpp
     system.cpp
     system_downloader.cpp
-    update_firmware.cpp)
+    update_firmware.cpp
+    debugger.cpp
+    symbol_resolver.cpp)
 
 if(WIN32)
     target_sources(obliteration PRIVATE resources.rc)
@@ -113,6 +118,9 @@ target_compile_features(obliteration PRIVATE cxx_std_17)
 target_link_libraries(obliteration PRIVATE Qt6::Widgets)
 target_link_libraries(obliteration PRIVATE Threads::Threads)
 target_link_libraries(obliteration PRIVATE ${LIBCORE})
+if(LINUX)
+    target_link_libraries(obliteration PRIVATE unwind unwind-ptrace unwind-x86_64)
+endif()
 
 if(WIN32)
     target_link_libraries(obliteration PRIVATE bcrypt imm32 ntdll setupapi userenv version winmm ws2_32)

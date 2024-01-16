@@ -3,11 +3,14 @@ pub use self::stack::*;
 
 use self::iter::StartFromMut;
 use self::storage::Storage;
+use crate::errno::EACCES;
 use crate::errno::{Errno, EINVAL, ENOMEM, EOPNOTSUPP};
 use crate::process::VThread;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::{info, warn};
 use bitflags::bitflags;
+use human_bytes::human_bytes;
+use libc::MAP_STACK;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::num::{NonZeroI32, TryFromIntError};
@@ -27,6 +30,17 @@ pub struct MemoryManager {
     allocation_granularity: usize,
     allocations: RwLock<BTreeMap<usize, Alloc>>, // Key is Alloc::addr.
     stack: AppStack,
+}
+
+#[repr(C)]
+struct VirtualQueryInfo {
+    start: usize,
+    end: usize,
+    offset: usize,
+    prot: u32,
+    mem_type: u32,
+    flags: u8,
+    name: [u8; 32],
 }
 
 impl MemoryManager {
@@ -83,7 +97,10 @@ impl MemoryManager {
 
         sys.register(69, &mm, Self::sys_sbrk);
         sys.register(70, &mm, Self::sys_sstk);
+        sys.register(73, &mm, Self::sys_munmap);
         sys.register(477, &mm, Self::sys_mmap);
+        sys.register(628, &mm, Self::sys_mmap_dmem);
+        sys.register(572, &mm, Self::sys_virtual_query);
         sys.register(588, &mm, Self::sys_mname);
 
         Ok(mm)
@@ -101,6 +118,10 @@ impl MemoryManager {
 
     pub fn stack(&self) -> &AppStack {
         &self.stack
+    }
+
+    fn round_page(addr: usize) -> usize {
+        (addr + 0x3fff) & !(0x3fff)
     }
 
     pub fn mmap<N: Into<String>>(
@@ -125,14 +146,27 @@ impl MemoryManager {
             todo!("mmap with len = 0");
         }
 
-        if flags.intersects(MappingFlags::MAP_NOEXTEND | MappingFlags::MAP_ANON) {
+        if flags.intersects(MappingFlags::MAP_VOID | MappingFlags::MAP_ANON) {
             if offset != 0 {
                 return Err(MmapError::NonZeroOffset);
             } else if fd != -1 {
                 return Err(MmapError::NonNegativeFd);
             }
-        } else if flags.contains(MappingFlags::MAP_STACK) {
-            todo!("mmap with flags & 0x400");
+        }
+
+        if flags.contains(MappingFlags::MAP_STACK) {
+            flags |= MappingFlags::MAP_ANON;
+
+            if prot
+                .intersection(Protections::GPU_READ)
+                .union(prot.intersection(Protections::CPU_RW))
+                != Protections::CPU_RW
+            {
+                return Err(MmapError::InvalidProtection);
+            }
+            if fd != -1 {
+                return Err(MmapError::NonNegativeFd);
+            }
         }
 
         flags.remove(MappingFlags::UNK2);
@@ -146,7 +180,18 @@ impl MemoryManager {
         }
 
         if flags.contains(MappingFlags::MAP_FIXED) {
-            todo!("mmap with flags & 0x10");
+            let pageoff = offset & 0x3fff;
+            let adjusted_addr = addr - pageoff;
+            let adjusted_len = len + pageoff;
+            let rounded_len = Self::round_page(adjusted_len);
+
+            if (adjusted_addr & 0x3fff) != 0 {
+                return Err(MmapError::InvalidOffset);
+            }
+            // TODO: check if addr is within min and max mappings for this proc
+            if adjusted_addr + rounded_len < adjusted_addr {
+                return Err(MmapError::InvalidOffset);
+            }
         } else if addr == 0 {
             if td
                 .as_ref()
@@ -157,13 +202,29 @@ impl MemoryManager {
         } else if (addr & 0xfffffffdffffffff) == 0 {
             // TODO: Check what the is value at offset 0x140 on vm_map.
         } else if addr == 0x880000000 {
-            todo!("mmap with addr = 0x880000000");
+            warn!("mmap with addr = 0x880000000");
         }
 
-        if flags.contains(MappingFlags::MAP_NOEXTEND) {
-            todo!("mmap with flags & 0x100");
+        if flags.contains(MappingFlags::MAP_VOID) {
+            flags |= MappingFlags::MAP_ANON;
+            td.as_ref().and_then(|t| {
+                t.set_fpop(None);
+                Some(t)
+            });
         } else if !flags.contains(MappingFlags::MAP_ANON) {
-            todo!("mmap with flags & 0x1000 = 0");
+            // info!(
+            //     "mmap({:?}, {:?}, {:?}, {:?}, {:?}, {:?}, {:?})",
+            //     addr,
+            //     len,
+            //     prot,
+            //     "dupa", //name.into().to_owned(),
+            //     flags.0,
+            //     fd,
+            //     offset
+            // );
+            flags |= MappingFlags::MAP_ANON;
+            // fd = -1;
+            // todo!("mmap with flags & 0x1000 = 0");
         }
 
         if flags.contains(MappingFlags::UNK1) {
@@ -180,7 +241,13 @@ impl MemoryManager {
             r => len + (Self::VIRTUAL_PAGE_SIZE - r),
         };
 
-        self.map(addr, len, prot, name.into())
+        self.map(
+            addr,
+            len,
+            prot,
+            name.into(),
+            flags.intersects(MappingFlags::MAP_VOID),
+        )
     }
 
     pub fn munmap(&self, addr: *mut u8, len: usize) -> Result<(), MunmapError> {
@@ -309,7 +376,15 @@ impl MemoryManager {
     ) -> Result<(), MemoryUpdateError> {
         let name = name.as_ref();
 
-        self.update(addr, len, |i| i.name != name, |i| i.name = name.to_owned())
+        self.update(
+            addr,
+            len,
+            |i| i.name != name,
+            |i| {
+                i.name = name.to_owned();
+                i.storage.name(name);
+            },
+        )
     }
 
     /// See `vm_mmap` on the PS4 for a reference.
@@ -319,32 +394,50 @@ impl MemoryManager {
         len: usize,
         prot: Protections,
         name: String,
+        void_mapping: bool,
     ) -> Result<VPages<'_>, MmapError> {
         // TODO: Check what is PS4 doing here.
         use std::collections::btree_map::Entry;
 
-        // Do allocation.
-        let addr = (addr + 0x3fff) & 0xffffffffffffc000;
-        let alloc = match self.alloc(addr, len, prot, name) {
-            Ok(v) => v,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::OutOfMemory {
-                    return Err(MmapError::NoMem(len));
-                } else {
-                    // We should not hit other error except for out of memory.
-                    panic!("Failed to allocate {len} bytes: {e}.");
-                }
-            }
-        };
+        info!("map({:#x})", addr);
 
-        // Store allocation info.
         let mut allocs = self.allocations.write().unwrap();
-        let alloc = match allocs.entry(alloc.addr as usize) {
-            Entry::Occupied(e) => panic!("Address {:p} is already allocated.", e.key()),
-            Entry::Vacant(e) => e.insert(alloc),
-        };
+        match allocs.entry(addr) {
+            Entry::Occupied(ref mut e) if void_mapping => {
+                let alloc = e.get_mut();
+                let (a1, a2) = alloc.split(len);
+                a1.storage.commit(addr as _, len, prot).unwrap();
+                a1.storage.name(&name);
 
-        Ok(VPages::new(self, alloc.addr, alloc.len))
+                allocs.insert(a2.addr as usize, a2);
+
+                return Ok(VPages::new(self, addr as _, len));
+            }
+            _ => {
+                // Do allocation.
+                let addr = (addr + 0x3fff) & 0xffffffffffffc000;
+                let alloc = match self.alloc(addr, len, prot, name) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::OutOfMemory {
+                            return Err(MmapError::NoMem(len));
+                        } else {
+                            // We should not hit other error except for out of memory.
+                            panic!("Failed to allocate {len} bytes: {e}.");
+                        }
+                    }
+                };
+
+                // Store allocation info.
+                let alloc = match allocs.entry(alloc.addr as usize) {
+                    Entry::Occupied(e) => panic!("Address {:p} is already allocated.", e.key()),
+                    Entry::Vacant(e) => e.insert(alloc),
+                };
+                info!("map::alloc = {:?}", alloc);
+
+                return Ok(VPages::new(self, alloc.addr, alloc.len));
+            }
+        }
     }
 
     fn update<F, U>(
@@ -491,6 +584,7 @@ impl MemoryManager {
             let len = len - ((addr as usize) - (storage.addr() as usize));
 
             storage.commit(addr, len, prot)?;
+            storage.name(&name);
 
             Ok(Alloc {
                 addr,
@@ -506,6 +600,7 @@ impl MemoryManager {
             let addr = storage.addr();
 
             storage.commit(addr, len, prot)?;
+            storage.name(&name);
 
             Ok(Alloc {
                 addr,
@@ -525,6 +620,34 @@ impl MemoryManager {
     fn sys_sstk(self: &Arc<Self>, _: &SysIn) -> Result<SysOut, SysErr> {
         // Return EOPNOTSUPP (Not yet implemented syscall)
         Err(SysErr::Raw(EOPNOTSUPP))
+    }
+
+    fn sys_munmap(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        Ok(0.into())
+    }
+
+    // fn alloc_dmem(self: &Arc<Self>, )
+
+    fn sys_mmap_dmem(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let addr: usize = i.args[0].into();
+        let len: usize = i.args[1].into();
+        let memory_type: i32 = i.args[2].try_into().unwrap();
+        let prot: Protections = i.args[3].try_into().unwrap();
+        let flags: MappingFlags = i.args[4].try_into().unwrap();
+        let phys_addr_start: usize = i.args[5].into();
+        info!(
+            "mmap_dmem({:#x}, {:#x} ({}), {}, {}, {}, {:#x})",
+            addr,
+            len,
+            human_bytes(len as f64),
+            memory_type,
+            prot,
+            flags,
+            phys_addr_start
+        );
+        // let ret = self.sys_mmap(i);
+
+        Ok(phys_addr_start.into())
     }
 
     fn sys_mmap(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -550,9 +673,53 @@ impl MemoryManager {
         }
 
         // TODO: Make a proper name.
-        let pages = self.mmap(addr, len, prot, "", flags, fd, pos)?;
+        let mut pages = self.mmap(addr, len, prot, "", flags, fd, pos)?;
 
         if addr != 0 && pages.addr() != addr {
+            warn!(
+                "mmap({:#x}, {:#x} ({}), {}, {}, {}, {}) was success with {:#x} instead of {:#x}.",
+                addr,
+                len,
+                human_bytes(len as f64),
+                prot,
+                flags,
+                fd,
+                pos,
+                pages.addr(),
+                addr
+            );
+            warn!("remapping");
+            let map_ranges =
+                proc_maps::get_process_maps(std::process::id().try_into().unwrap()).unwrap();
+
+            let mut try_allocate_addr = usize::MAX;
+            for w in map_ranges.windows(2) {
+                // if addr >= range.start() && addr <= range.start() + range.size() {
+                //     try_allocate_addr = Self::round_page(range.start() + range.size());
+                // info!("{:?}", w);
+
+                if addr > w[0].start() {
+                    continue;
+                }
+                let w0end = (&w[0].start() + &w[0].size());
+                let free_space = &w[1].start() - w0end;
+                // info!(
+                //     "{:#x} - ({:#x} + {:#x}) = {:#x}",
+                //     &w[1].start(),
+                //     &w[0].start(),
+                //     &w[0].size(),
+                //     free_space
+                // );
+                // info!("found {:#x} bytes of free space", free_space);
+                if free_space >= len {
+                    try_allocate_addr = Self::round_page(&w[0].start() + &w[0].size());
+                    break;
+                }
+            }
+            info!("trying mmap with {:#x}", try_allocate_addr);
+            self.munmap(pages.addr() as _, len)?;
+            pages = self.mmap(try_allocate_addr, len, prot, "", flags, fd, pos)?;
+            // if try_allocate_addr != 0 && pages.addr() != try_allocate_addr {
             warn!(
                 "mmap({:#x}, {:#x}, {}, {}, {}, {}) was success with {:#x} instead of {:#x}.",
                 addr,
@@ -562,8 +729,9 @@ impl MemoryManager {
                 fd,
                 pos,
                 pages.addr(),
-                addr
+                try_allocate_addr
             );
+            // }
         } else {
             info!(
                 "{:#x}:{:p} is mapped as {} with {}.",
@@ -574,7 +742,48 @@ impl MemoryManager {
             );
         }
 
-        Ok(pages.into_raw().into())
+        if flags.intersects(MappingFlags::MAP_STACK) {
+            Ok(unsafe { (pages.into_raw().add(len)) }.into())
+        } else {
+            Ok(pages.into_raw().into())
+        }
+    }
+
+    fn sys_virtual_query(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let addr: usize = i.args[0].into();
+        let unk: usize = i.args[1].into();
+        let info: *mut VirtualQueryInfo = i.args[2].into();
+        let info_size: usize = i.args[3].into();
+
+        info!(
+            "sys_virtual_query({:#x}, {:#x}, {:#?}, {:#x}",
+            addr, unk, info, info_size
+        );
+
+        let map_ranges =
+            proc_maps::get_process_maps(std::process::id().try_into().unwrap()).unwrap();
+
+        for mapped_range in map_ranges.iter() {
+            if (addr >= mapped_range.start() && addr < (mapped_range.start() + mapped_range.size()))
+                || (unk & 1 == 1 && addr < mapped_range.start())
+            {
+                let info_struct = VirtualQueryInfo {
+                    start: mapped_range.start(),
+                    end: mapped_range.start() + mapped_range.size(),
+                    offset: mapped_range.offset,
+                    prot: 0,
+                    mem_type: 0,
+                    flags: 0,
+                    name: [0; 32],
+                };
+                unsafe {
+                    *info = info_struct;
+                }
+                return Ok(0.into());
+            }
+        }
+
+        return Err(SysErr::Raw(EACCES));
     }
 
     fn sys_mname(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -636,7 +845,7 @@ impl MemoryManager {
 unsafe impl Sync for MemoryManager {}
 
 /// Contains information for an allocation of virtual pages.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Alloc {
     addr: *mut u8,
     len: usize,
@@ -649,6 +858,19 @@ impl Alloc {
     fn end(&self) -> *mut u8 {
         unsafe { self.addr.add(self.len) }
     }
+
+    fn split(&mut self, len: usize) -> (&Self, Self) {
+        let mut a2 = self.to_owned();
+        unsafe {
+            a2.addr = a2.addr.add(len);
+        }
+        a2.len -= len;
+
+        let a1 = self;
+        a1.len = len;
+
+        (a1, a2)
+    }
 }
 
 unsafe impl Send for Alloc {}
@@ -660,6 +882,7 @@ bitflags! {
     pub struct Protections: u32 {
         const CPU_READ = 0x00000001;
         const CPU_WRITE = 0x00000002;
+        const CPU_RW = Self::CPU_READ.bits() | Self::CPU_WRITE.bits();
         const CPU_EXEC = 0x00000004;
         const CPU_MASK = Self::CPU_READ.bits() | Self::CPU_WRITE.bits() | Self::CPU_EXEC.bits();
         const GPU_READ = 0x00000010;
@@ -735,15 +958,18 @@ bitflags! {
     #[repr(transparent)]
     #[derive(Clone, Copy)]
     pub struct MappingFlags: u32 {
+        const MAP_SHARED = 0x00000001;
         const MAP_PRIVATE = 0x00000002;
         const MAP_FIXED = 0x00000010;
-        const MAP_NOEXTEND = 0x00000100;
+        const MAP_NO_OVERWRITE = 0x00000080;
+        const MAP_VOID = 0x00000100;
         const MAP_STACK = 0x00000400;
         const MAP_ANON = 0x00001000;
         const MAP_GUARD = 0x00002000;
         const UNK2 = 0x00010000;
         const UNK3 = 0x00100000;
         const UNK1 = 0x00200000;
+        const MAP_NO_COALESCE = 0x00400000;
     }
 }
 
@@ -786,6 +1012,9 @@ pub enum MmapError {
     #[error("invalid offset")]
     InvalidOffset,
 
+    #[error("invalid memory protection requested")]
+    InvalidProtection,
+
     #[error("no memory available for {0} bytes")]
     NoMem(usize),
 }
@@ -793,7 +1022,10 @@ pub enum MmapError {
 impl Errno for MmapError {
     fn errno(&self) -> NonZeroI32 {
         match self {
-            Self::NonNegativeFd | Self::NonZeroOffset | Self::InvalidOffset => EINVAL,
+            Self::NonNegativeFd
+            | Self::NonZeroOffset
+            | Self::InvalidOffset
+            | Self::InvalidProtection => EINVAL,
             Self::NoMem(_) => ENOMEM,
         }
     }

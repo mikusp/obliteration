@@ -1,6 +1,7 @@
 use super::{IoCmd, Vnode};
 use crate::errno::Errno;
 use crate::process::VThread;
+use crate::{error, info};
 use bitflags::bitflags;
 use std::any::Any;
 use std::io::{Read, Seek, SeekFrom};
@@ -37,6 +38,10 @@ impl VFile {
         &mut self.flags
     }
 
+    pub fn read(&self, buf: &mut [u8], td: Option<&VThread>) -> Result<usize, Box<dyn Errno>> {
+        (self.ops.read)(self, buf, td)
+    }
+
     pub fn write(&self, data: &[u8], td: Option<&VThread>) -> Result<usize, Box<dyn Errno>> {
         (self.ops.write)(self, data, td)
     }
@@ -46,20 +51,21 @@ impl VFile {
         cmd: IoCmd,
         data: &mut [u8],
         td: Option<&VThread>,
-    ) -> Result<(), Box<dyn Errno>> {
+    ) -> Result<i64, Box<dyn Errno>> {
         (self.ops.ioctl)(self, cmd, data, td)
     }
 }
 
 impl Seek for VFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        todo!()
+        Ok((self.ops.seek)(self, pos, None).unwrap())
     }
 }
 
 impl Read for VFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        todo!()
+        // info!("read VFile");
+        Ok((self.ops.read)(self, buf, None).unwrap())
     }
 }
 
@@ -72,9 +78,30 @@ pub enum VFileType {
 /// An implementation of `fileops` structure.
 #[derive(Debug)]
 pub struct VFileOps {
+    pub read: fn(&VFile, &mut [u8], Option<&VThread>) -> Result<usize, Box<dyn Errno>>,
     pub write: fn(&VFile, &[u8], Option<&VThread>) -> Result<usize, Box<dyn Errno>>,
-    pub ioctl: fn(&VFile, IoCmd, &mut [u8], Option<&VThread>) -> Result<(), Box<dyn Errno>>,
+    pub ioctl: fn(&VFile, IoCmd, &mut [u8], Option<&VThread>) -> Result<i64, Box<dyn Errno>>,
+    pub seek: fn(&VFile, SeekFrom, Option<&VThread>) -> Result<u64, Box<dyn Errno>>,
+    pub stat: fn(&VFile, &mut [u8], Option<&VThread>) -> Result<u64, Box<dyn Errno>>,
 }
+
+pub static DEFAULT_VFILEOPS: VFileOps = VFileOps {
+    read: |vf, buf, td| match &vf.ty {
+        VFileType::Vnode(vn) => vn.read(td, buf),
+    },
+    write: |vf, buf, td| match &vf.ty {
+        VFileType::Vnode(vn) => vn.write(td, buf),
+    },
+    ioctl: |vf, cmd, buf, td| match &vf.ty {
+        VFileType::Vnode(vn) => vn.ioctl(cmd, buf, td),
+    },
+    seek: |vf, pos, td| match &vf.ty {
+        VFileType::Vnode(vn) => vn.seek(pos, td),
+    },
+    stat: |vf, buf, td| match &vf.ty {
+        VFileType::Vnode(vn) => vn.stat(buf, td),
+    },
+};
 
 bitflags! {
     /// Flags for [`VFile`].

@@ -50,7 +50,10 @@ pub struct Module<E: ExecutionEngine + ?Sized> {
 }
 
 impl<E: ExecutionEngine> Module<E> {
-    pub(super) fn map<N: Into<String>>(
+    // pub fn set_scanned(&mut self, scanned: bool) -> () {
+    //     self.init_scanned = scanned;
+    // }
+    pub(super) fn map<N: Into<String> + Copy>(
         mm: &Arc<MemoryManager>,
         ee: &Arc<E>,
         mut image: Elf<VFile>,
@@ -272,6 +275,10 @@ impl<E: ExecutionEngine> Module<E> {
 
     pub fn dag_dynamic_mut(&self) -> GutexWriteGuard<'_, Vec<Arc<Self>>> {
         self.dag_dynamic.write()
+    }
+
+    pub fn needed(&self) -> &[NeededModule] {
+        self.needed.as_ref()
     }
 
     pub fn modules(&self) -> &[ModuleInfo] {
@@ -736,6 +743,7 @@ bitflags! {
         const INIT_SCANNED = 0x0010;
         const ON_FINI_LIST = 0x0020;
         const DAG_INITED = 0x0040;
+        const INIT_DONE = 0x0080;
         const UNK1 = 0x0100; // TODO: Rename this.
         const UNK2 = 0x0200; // TODO: Rename this.
         const UNK3 = 0x0400; // TODO: Rename this.
@@ -753,7 +761,7 @@ impl Display for ModuleFlags {
 /// An implementation of `Needed_Entry`.
 #[derive(Debug)]
 pub struct NeededModule {
-    name: String,
+    pub name: String,
 }
 
 /// Indicated a type of value in the relocation entry.

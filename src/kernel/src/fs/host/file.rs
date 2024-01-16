@@ -1,6 +1,8 @@
-use std::io::Error;
+use std::io::{Error, SeekFrom};
 use std::mem::zeroed;
 use std::path::{Path, PathBuf};
+
+use crate::info;
 
 /// Encapsulate a raw file or directory on the host.
 pub struct HostFile {
@@ -11,6 +13,7 @@ pub struct HostFile {
 impl HostFile {
     pub fn open<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let path = path.into();
+        // info!("HostFile::open {path:?}");
         let raw = Self::raw_open(&path)?;
 
         Ok(Self { path, raw })
@@ -18,6 +21,27 @@ impl HostFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        let result = Self::raw_read(self, buf);
+
+        result
+    }
+
+    pub fn seek(&self, pos: SeekFrom) -> Result<u64, Error> {
+        let result = Self::raw_seek(self, pos);
+
+        result
+    }
+
+    #[cfg(unix)]
+    pub fn stat(&self, buf: &mut [u8]) -> Result<u64, Error> {
+        if unsafe { libc::fstat(self.raw, buf.as_mut_ptr().cast()) } < 0 {
+            return Err(Error::last_os_error());
+        }
+
+        Ok(0)
     }
 
     #[cfg(unix)]
@@ -119,6 +143,39 @@ impl HostFile {
             Err(Error::last_os_error())
         } else {
             Ok(handle)
+        }
+    }
+
+    #[cfg(unix)]
+    fn raw_read(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        let bytes_read = unsafe { libc::read(self.raw, buf.as_mut_ptr().cast(), buf.len()) };
+
+        if bytes_read < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(bytes_read.try_into().unwrap())
+        }
+    }
+
+    #[cfg(unix)]
+    fn raw_seek(&self, pos: SeekFrom) -> Result<u64, Error> {
+        let offset = match pos {
+            SeekFrom::Current(off) => off,
+            SeekFrom::End(off) => off,
+            SeekFrom::Start(off) => off.try_into().unwrap(),
+        };
+        let whence = match pos {
+            SeekFrom::Current(_) => libc::SEEK_CUR,
+            SeekFrom::End(_) => libc::SEEK_END,
+            SeekFrom::Start(_) => libc::SEEK_SET,
+        };
+
+        let ret = unsafe { libc::lseek(self.raw, offset, whence) };
+
+        if ret < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(ret.try_into().unwrap())
         }
     }
 }

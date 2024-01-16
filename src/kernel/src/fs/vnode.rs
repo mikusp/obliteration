@@ -1,9 +1,10 @@
-use super::{unixify_access, Access, Mode, Mount, OpenFlags, VFile};
+use super::{unixify_access, Access, IoCmd, Mode, Mount, OpenFlags, VFile};
 use crate::errno::{Errno, ENOTDIR, EOPNOTSUPP, EPERM};
 use crate::process::VThread;
 use crate::ucred::{Gid, Uid};
 use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
 use std::any::Any;
+use std::io::SeekFrom;
 use std::num::NonZeroI32;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -103,6 +104,56 @@ impl Vnode {
         self.get_op(|v| v.lookup)(self, td, name)
     }
 
+    pub fn open(
+        self: &Arc<Self>,
+        td: Option<&VThread>,
+        flags: OpenFlags,
+        file: Option<&mut VFile>,
+    ) -> Result<(), Box<dyn Errno>> {
+        self.get_op(|v| v.open)(self, td, flags, file)
+    }
+
+    pub fn read(
+        self: &Arc<Self>,
+        td: Option<&VThread>,
+        buf: &mut [u8],
+    ) -> Result<usize, Box<dyn Errno>> {
+        self.get_op(|v| v.read)(self, td, buf)
+    }
+
+    pub fn write(
+        self: &Arc<Self>,
+        td: Option<&VThread>,
+        buf: &[u8],
+    ) -> Result<usize, Box<dyn Errno>> {
+        self.get_op(|v| v.write)(self, td, buf)
+    }
+
+    pub fn ioctl(
+        self: &Arc<Self>,
+        cmd: IoCmd,
+        buf: &mut [u8],
+        td: Option<&VThread>,
+    ) -> Result<i64, Box<dyn Errno>> {
+        self.get_op(|v| v.ioctl)(self, td, cmd, buf)
+    }
+
+    pub fn seek(
+        self: &Arc<Self>,
+        pos: SeekFrom,
+        td: Option<&VThread>,
+    ) -> Result<u64, Box<dyn Errno>> {
+        self.get_op(|v| v.seek)(self, td, pos)
+    }
+
+    pub fn stat(
+        self: &Arc<Self>,
+        buf: &mut [u8],
+        td: Option<&VThread>,
+    ) -> Result<u64, Box<dyn Errno>> {
+        self.get_op(|v| v.stat)(self, td, buf)
+    }
+
     fn get_op<F>(&self, f: fn(&'static VopVector) -> Option<F>) -> F {
         let mut vec = Some(self.op);
 
@@ -132,6 +183,7 @@ impl Drop for Vnode {
 pub enum VnodeType {
     Directory(bool), // VDIR
     Character,       // VCHR
+    RegularFile,     // VREG
 }
 
 /// An implementation of `vop_vector` structure.
@@ -146,6 +198,11 @@ pub struct VopVector {
     pub getattr: Option<VopGetAttr>,    // vop_getattr
     pub lookup: Option<VopLookup>,      // vop_lookup
     pub open: Option<VopOpen>,          // vop_open
+    pub read: Option<VopRead>,          // vop_read
+    pub write: Option<VopWrite>,        // vop_write
+    pub ioctl: Option<VopIoctl>,        // vop_ioctl
+    pub seek: Option<VopSeek>,          // vop_seek
+    pub stat: Option<VopStat>,
 }
 
 pub type VopAccess = fn(&Arc<Vnode>, Option<&VThread>, Access) -> Result<(), Box<dyn Errno>>;
@@ -154,6 +211,12 @@ pub type VopGetAttr = fn(&Arc<Vnode>) -> Result<VnodeAttrs, Box<dyn Errno>>;
 pub type VopLookup = fn(&Arc<Vnode>, Option<&VThread>, &str) -> Result<Arc<Vnode>, Box<dyn Errno>>;
 pub type VopOpen =
     fn(&Arc<Vnode>, Option<&VThread>, OpenFlags, Option<&mut VFile>) -> Result<(), Box<dyn Errno>>;
+pub type VopRead = fn(&Arc<Vnode>, Option<&VThread>, &mut [u8]) -> Result<usize, Box<dyn Errno>>;
+pub type VopWrite = fn(&Arc<Vnode>, Option<&VThread>, &[u8]) -> Result<usize, Box<dyn Errno>>;
+pub type VopIoctl =
+    fn(&Arc<Vnode>, Option<&VThread>, IoCmd, &mut [u8]) -> Result<i64, Box<dyn Errno>>;
+pub type VopSeek = fn(&Arc<Vnode>, Option<&VThread>, SeekFrom) -> Result<u64, Box<dyn Errno>>;
+pub type VopStat = fn(&Arc<Vnode>, Option<&VThread>, &mut [u8]) -> Result<u64, Box<dyn Errno>>;
 
 /// An implementation of `vattr` struct.
 pub struct VnodeAttrs {
@@ -216,7 +279,12 @@ pub static DEFAULT_VNODEOPS: VopVector = VopVector {
     accessx: Some(accessx),
     getattr: Some(|_| Err(Box::new(DefaultError::NotSupported))), // Inline vop_bypass.
     lookup: Some(|_, _, _| Err(Box::new(DefaultError::NotDirectory))),
-    open: Some(|_, _, _, _| Ok(())),
+    open: None,
+    read: None,
+    write: None,
+    ioctl: None,
+    seek: None,
+    stat: None,
 };
 
 fn accessx(vn: &Arc<Vnode>, td: Option<&VThread>, access: Access) -> Result<(), Box<dyn Errno>> {
