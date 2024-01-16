@@ -9,6 +9,8 @@ pub use self::vnode::*;
 
 use self::host::HostFs;
 use crate::errno::{Errno, EBADF, EBUSY, EINVAL, ENAMETOOLONG, ENODEV, ENOENT};
+use crate::error;
+use crate::fs::host::MountSource::{self, Bind, Host};
 use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
@@ -18,9 +20,11 @@ use gmtx::{Gutex, GutexGroup};
 use macros::vpath;
 use param::Param;
 use std::any::Any;
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::num::{NonZeroI32, TryFromIntError};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use thiserror::Error;
@@ -153,7 +157,36 @@ impl Fs {
     }
 
     pub fn open<P: AsRef<VPath>>(&self, path: P, td: Option<&VThread>) -> Result<VFile, OpenError> {
-        todo!()
+        // let bt = Backtrace::force_capture();
+        // info!("{bt:?}");
+        // let fp = path.as_ref();
+
+        // info!("Opening {fp} on thread.");
+        // let m = self.mounts.read();
+        // let mm = m.deref();
+        // info!("mounts {mm:?}");
+
+        // let root = self.mounts.read().root().clone();
+        // let data = root.data().cloned();
+        // let host = data.unwrap().downcast::<HostFs>().unwrap().app().clone();
+        // // info!("data {data:?}");
+        // let selfApp = self.app();
+        // let root1 = self.root();
+        // info!("host {host:?}");
+        // info!("self app {selfApp:?}");
+        // info!("root {root1:?}");
+
+        let file = self.lookup(path, td);
+
+        match file {
+            Err(err) => Err(todo!("err {err}")),
+            Ok(vn) => Ok(VFile::new(
+                VFileType::Vnode(vn.clone()),
+                vn,
+                &DEFAULT_VFILEOPS,
+            )),
+        }
+        // todo!("open");
     }
 
     /// This method will **not** follow the last component if it is a mount point or a link.
@@ -168,11 +201,106 @@ impl Fs {
         // 2. namei rely on mutating the nameidata structure, which contribute to its complication.
         //
         // So we decided to implement our own lookup algorithm.
-        let path = path.as_ref();
+        let mut path = path.as_ref();
         let mut root = match td {
             Some(td) => td.proc().files().root(),
             None => self.root(),
         };
+
+        let rootMount = self.mounts.read().root().clone();
+        let host = rootMount.data().clone().downcast::<HostFs>();
+
+        let mut hostMountPoint: Option<MountSource> = None;
+
+        if let Ok(ref temp) = host {
+            loop {
+                match hostMountPoint {
+                    None => {
+                        for (k, v) in temp.maps().into_iter() {
+                            if path.starts_with(k.as_str()) {
+                                match v {
+                                    Bind(vpath) => {
+                                        let vp = path.replace(k.as_str(), &vpath);
+                                        hostMountPoint = Some(Bind(VPathBuf::from(
+                                            VPath::new(vp.as_str()).unwrap(),
+                                        )))
+                                    }
+                                    Host(hpath) => {
+                                        info!("reached host {hpath:?}");
+                                        let mut pb = PathBuf::new();
+                                        for (_, i) in hpath.components().enumerate() {
+                                            pb.push(i);
+                                        }
+                                        let rest = path.strip_prefix(k.as_str()).unwrap();
+                                        for i in rest.split('/') {
+                                            pb.push(i);
+                                        }
+                                        info!("created path {pb:?}");
+                                        hostMountPoint = Some(Host(pb));
+                                        // hostMountPoint = Some(Host(PathBuf::from(
+                                        //     VPath::new(
+                                        //         path.replace(k.as_str(), hpath.to_str().unwrap())
+                                        //             .as_str(),
+                                        //     )
+                                        //     .unwrap(),
+                                        // )))
+                                    }
+                                }
+                                break;
+                            }
+                            // if hostMountPoint.is_none() {
+                            //     todo!("path {path} does not conform to any mountsources");
+                            // }
+                        }
+                    }
+                    Some(Bind(ref vpath)) => {
+                        for (k, v) in temp.maps().into_iter() {
+                            if vpath.starts_with(k.as_str()) {
+                                match v {
+                                    Bind(vpath) => {
+                                        let vp = path.replace(k.as_str(), &vpath);
+                                        hostMountPoint = Some(Bind(VPathBuf::from(
+                                            VPath::new(vp.as_str()).unwrap(),
+                                        )))
+                                    }
+                                    Host(hpath) => {
+                                        info!("reached host {hpath:?}");
+                                        let mut pb = PathBuf::new();
+                                        for (_, i) in hpath.components().enumerate() {
+                                            pb.push(i);
+                                        }
+                                        let rest = path.strip_prefix(k.as_str()).unwrap();
+                                        for i in rest.split('/') {
+                                            pb.push(i);
+                                        }
+                                        info!("created path {pb:?}");
+                                        hostMountPoint = Some(Host(pb));
+                                        // hostMountPoint = Some(Host(PathBuf::from(
+                                        //     VPath::new(
+                                        //         path.replace(k.as_str(), hpath.to_str().unwrap())
+                                        //             .as_str(),
+                                        //     )
+                                        //     .unwrap(),
+                                        // )))
+                                    }
+                                }
+                                break;
+                            }
+                            // if hostMountPoint.is_none() {
+                            //     todo!("path {path} does not conform to any mountsources");
+                            // }
+                        }
+                    }
+                    Some(Host(ref v)) => break,
+                }
+            }
+
+            match hostMountPoint {
+                Some(Bind(ref foo)) => info!("final {foo:?}"),
+                Some(Host(ref foo)) => info!("final2 {foo:?}"),
+                None => todo!("empty path"),
+            }
+        }
 
         // Get starting point.
         let mut vn = if path.is_absolute() {
@@ -203,9 +331,11 @@ impl Fs {
             None => drop(item),
         }
 
+        info!("walking on path {path}");
         // Walk on path component.
         for (i, com) in path.components().enumerate() {
             // TODO: Handle link.
+            info!("vn {vn:?}");
             match vn.ty() {
                 VnodeType::Directory(_) => {
                     let mut item = vn.item_mut();
@@ -228,6 +358,7 @@ impl Fs {
                     }
                 }
                 VnodeType::Character => return Err(LookupError::NotFound),
+                VnodeType::RegularFile => break,
             }
 
             // Prevent ".." on root.
@@ -239,6 +370,8 @@ impl Fs {
             vn = match vn.lookup(td, com) {
                 Ok(v) => v,
                 Err(e) => {
+                    println!("{}", Backtrace::force_capture());
+                    error!("{e:?}");
                     if e.errno() == ENOENT {
                         return Err(LookupError::NotFound);
                     } else {
@@ -264,12 +397,18 @@ impl Fs {
             return Err(SysErr::Raw(EINVAL));
         }
 
-        let td = VThread::current().unwrap();
-        let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
-        let buf = unsafe { std::slice::from_raw_parts(ptr, len) };
-        let written = file.write(buf, Some(&td))?;
+        if fd == 1 || fd == 2 {
+            let buf = unsafe { std::slice::from_raw_parts(ptr, len) };
+            eprint!("{}", String::from_utf8(buf.to_vec()).unwrap());
+            Ok(buf.len().into())
+        } else {
+            let td = VThread::current().unwrap();
+            let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+            let buf = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let written = file.write(buf, Some(&td))?;
 
-        Ok(written.into())
+            Ok(written.into())
+        }
     }
 
     fn sys_open(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -401,11 +540,11 @@ impl Fs {
         td.priv_check(Privilege::SCE683)?;
 
         // TODO: Check vnode::v_rdev.
-        let vn = self.lookup(path, Some(&td))?;
+        // let vn = self.lookup(path, Some(&td))?;
 
-        if !vn.is_character() {
-            return Err(SysErr::Raw(EINVAL));
-        }
+        // if !vn.is_character() {
+        //     return Err(SysErr::Raw(EINVAL));
+        // }
 
         // TODO: It seems like the initial ucred of the process is either root or has PRIV_VFS_ADMIN
         // privilege.

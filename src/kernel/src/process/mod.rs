@@ -117,6 +117,7 @@ impl VProc {
         sys.register(557, &vp, Self::sys_namedobj_create);
         sys.register(585, &vp, Self::sys_is_in_sandbox);
         sys.register(587, &vp, Self::sys_get_authinfo);
+        sys.register(601, &vp, Self::sys_mdbg_service);
         sys.register(602, &vp, Self::sys_randomized_path);
 
         Ok(vp)
@@ -581,6 +582,11 @@ impl VProc {
         }
 
         Ok(SysOut::ZERO)
+    }
+
+    fn sys_mdbg_service(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        info!("STUB: sys_mdbg_service");
+        Ok(1.into())
     }
 
     fn sys_randomized_path(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {

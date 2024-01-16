@@ -441,6 +441,9 @@ struct Args {
     game: PathBuf,
 
     #[arg(long)]
+    eboot: Option<PathBuf>,
+
+    #[arg(long)]
     debug_dump: Option<PathBuf>,
 
     #[arg(long)]

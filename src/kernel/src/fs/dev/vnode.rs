@@ -17,6 +17,10 @@ pub static VNODE_OPS: VopVector = VopVector {
     getattr: Some(getattr),
     lookup: Some(lookup),
     open: None,
+    read: None,
+    write: None,
+    ioctl: None,
+    seek: None,
 };
 
 pub static CHARACTER_OPS: VopVector = VopVector {
@@ -26,6 +30,10 @@ pub static CHARACTER_OPS: VopVector = VopVector {
     getattr: Some(getattr),
     lookup: None,
     open: Some(open),
+    read: None,
+    write: None,
+    ioctl: Some(|_, _, _, _| Ok(())),
+    seek: None,
 };
 
 fn access(vn: &Arc<Vnode>, td: Option<&VThread>, access: Access) -> Result<(), Box<dyn Errno>> {
@@ -91,6 +99,7 @@ fn getattr(vn: &Arc<Vnode>) -> Result<VnodeAttrs, Box<dyn Errno>> {
     let size = match vn.ty() {
         VnodeType::Directory(_) => 512,
         VnodeType::Character => 0,
+        VnodeType::RegularFile => unreachable!(),
     };
 
     Ok(VnodeAttrs::new(*uid, *gid, *mode, size))

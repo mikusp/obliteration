@@ -61,9 +61,10 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         dump: Option<&Path>,
     ) -> Result<Arc<Self>, RuntimeLinkerError<E>> {
         // Get path to eboot.bin.
-        let mut path = fs.app().join("app0").unwrap();
+        // let mut path = fs.app().join("app0").unwrap();
+        // let mut path = fs.app().to_owned();
 
-        path.push("eboot.bin").unwrap();
+        let mut path = fs.app().join("eboot.bin").unwrap();
 
         // Get eboot.bin.
         let file = match fs.open(&path, None) {

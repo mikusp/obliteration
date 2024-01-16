@@ -1,4 +1,5 @@
 use super::ExecutionEngine;
+use crate::error;
 use crate::fs::{VPath, VPathBuf};
 use crate::memory::Protections;
 use crate::process::VThread;
@@ -11,6 +12,7 @@ use iced_x86::code_asm::{
 };
 use iced_x86::{Code, Decoder, DecoderOptions, Instruction, OpKind, Register};
 use std::any::Any;
+use std::backtrace::Backtrace;
 use std::mem::{size_of, transmute};
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
@@ -483,6 +485,7 @@ impl NativeEngine {
     /// # Safety
     /// This method cannot be called from Rust.
     unsafe extern "sysv64" fn int44(&self, offset: usize, module: &VPathBuf) -> ! {
+        error!("int44 backtrace: {}", Backtrace::force_capture());
         panic!("Exiting with int 0x44 at {offset:#x} on {module}.");
     }
 

@@ -7,6 +7,7 @@ use std::num::TryFromIntError;
 
 /// Input of the syscall entry point.
 #[repr(C)]
+#[derive(Debug)]
 pub struct SysIn<'a> {
     pub id: u32,
     pub offset: usize,
@@ -16,7 +17,7 @@ pub struct SysIn<'a> {
 
 /// An argument of the syscall.
 #[repr(transparent)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SysArg(usize);
 
 impl SysArg {

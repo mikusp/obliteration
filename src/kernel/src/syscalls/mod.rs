@@ -71,7 +71,7 @@ impl Syscalls {
         let v = match h(i) {
             Ok(v) => v,
             Err(e) => {
-                warn!(e, "Syscall {} failed", i.id);
+                warn!(e, "Syscall {:?} failed", i);
                 return e.errno().get().into();
             }
         };
