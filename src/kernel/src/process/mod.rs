@@ -292,12 +292,23 @@ impl VProc {
         if sig == 0 || sig > SIG_MAXSIG {
             return Err(SysErr::Raw(EINVAL));
         }
+        let sig = NonZeroI32::new(sig).unwrap();
 
         // Save the old actions.
         let mut acts = self.sigacts.write();
 
         if !oact.is_null() {
-            todo!("sys_sigaction with oact != null");
+            let handler = acts.handler(sig);
+            let mask = acts.catchmask(sig);
+            let old_act = SignalAct {
+                handler: handler,
+                // TODO: return proper flags
+                flags: SignalFlags::SA_SIGINFO,
+                mask: mask,
+            };
+            unsafe {
+                *oact = old_act;
+            }
         }
 
         if act.is_null() {
@@ -305,7 +316,6 @@ impl VProc {
         }
 
         // Set new actions.
-        let sig = NonZeroI32::new(sig).unwrap();
         let handler = unsafe { (*act).handler };
         let flags = unsafe { (*act).flags };
         let mut mask = unsafe { (*act).mask };

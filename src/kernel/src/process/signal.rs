@@ -38,6 +38,10 @@ impl SignalActs {
         self.handler[(sig.get() - 1) as usize] = h;
     }
 
+    pub fn catchmask(&self, sig: NonZeroI32) -> SignalSet {
+        self.catchmask[(sig.get() - 1) as usize]
+    }
+
     pub fn set_catchmask(&mut self, sig: NonZeroI32, mask: SignalSet) {
         self.catchmask[(sig.get() - 1) as usize] = mask;
     }
