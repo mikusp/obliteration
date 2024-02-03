@@ -141,7 +141,7 @@ fn start() -> Result<(), KernelError> {
     writeln!(
         log,
         "Application Version : {}",
-        param.app_ver().as_ref().unwrap()
+        param.app_ver().as_ref().unwrap_or(&String::from("UNKNOWN"))
     )
     .unwrap();
 
