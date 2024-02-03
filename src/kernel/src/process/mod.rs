@@ -35,6 +35,7 @@ mod group;
 mod rlimit;
 mod session;
 mod signal;
+pub mod sleep;
 mod thread;
 
 /// An implementation of `proc` structure represent the main application process.
@@ -108,6 +109,7 @@ impl VProc {
         sys.register(20, &vp, |p, _| Ok(p.id().into()));
         sys.register(50, &vp, Self::sys_setlogin);
         sys.register(147, &vp, Self::sys_setsid);
+        sys.register(240, &vp, Self::sys_nanosleep);
         sys.register(340, &vp, Self::sys_sigprocmask);
         sys.register(416, &vp, Self::sys_sigaction);
         sys.register(432, &vp, Self::sys_thr_self);
@@ -221,6 +223,27 @@ impl VProc {
         info!("Virtual process now set as group leader.");
 
         Ok(self.id.into())
+    }
+
+    fn sys_nanosleep(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        use crate::process::sleep::Timespec;
+
+        let req: *const Timespec = i.args[0].try_into().unwrap();
+        let rem: *mut Timespec = i.args[1].try_into().unwrap();
+
+        let sleep = unsafe { &*req };
+
+        if sleep.seconds < 0 || sleep.nanoseconds < 0 || sleep.nanoseconds > 999999999 {
+            return Err(SysErr::Raw(EINVAL));
+        }
+
+        info!("sleeping for {:#?}", sleep);
+
+        if !rem.is_null() {
+            unsafe { *rem = zeroed() }
+        }
+
+        Timespec::nanosleep(sleep)
     }
 
     fn sys_sigprocmask(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
