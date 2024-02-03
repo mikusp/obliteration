@@ -328,7 +328,15 @@ impl MemoryManager {
     ) -> Result<(), MemoryUpdateError> {
         let name = name.as_ref();
 
-        self.update(addr, len, |i| i.name != name, |i| i.name = name.to_owned())
+        self.update(
+            addr,
+            len,
+            |i| i.name != name,
+            |i| {
+                i.name = name.to_owned();
+                i.storage.name(name);
+            },
+        )
     }
 
     /// See `vm_mmap` on the PS4 for a reference.
@@ -756,6 +764,7 @@ bitflags! {
     #[repr(transparent)]
     #[derive(Clone, Copy)]
     pub struct MappingFlags: u32 {
+        const MAP_SHARED = 0x00000001;
         const MAP_PRIVATE = 0x00000002;
         const MAP_FIXED = 0x00000010;
         const MAP_NOEXTEND = 0x00000100;

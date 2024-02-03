@@ -1,7 +1,8 @@
 use crate::errno::EINVAL;
-use crate::fs::Fs;
+use crate::fs::{make_dev, CdevSw, DriverFlags, Fs, MakeDev, Mode};
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::ucred::{Gid, Uid};
 use std::sync::Arc;
 
 /// An implementation of direct memory system on the PS4.
@@ -12,6 +13,48 @@ pub struct DmemManager {
 impl DmemManager {
     pub fn new(fs: &Arc<Fs>, sys: &mut Syscalls) -> Arc<Self> {
         let dmem = Arc::new(Self { fs: fs.clone() });
+
+        let dmem0 = Arc::new(CdevSw::new(
+            DriverFlags::from_bits_retain(0x80000000),
+            None,
+            None,
+        ));
+
+        make_dev(
+            &dmem0,
+            0,
+            "dmem0",
+            Uid::ROOT,
+            Gid::ROOT,
+            Mode::new(0o511).unwrap(),
+            None,
+            MakeDev::MAKEDEV_ETERNAL,
+        )
+        .unwrap();
+
+        make_dev(
+            &dmem0,
+            0,
+            "dmem1",
+            Uid::ROOT,
+            Gid::ROOT,
+            Mode::new(0o511).unwrap(),
+            None,
+            MakeDev::MAKEDEV_ETERNAL,
+        )
+        .unwrap();
+
+        make_dev(
+            &dmem0,
+            0,
+            "dmem2",
+            Uid::ROOT,
+            Gid::ROOT,
+            Mode::new(0o511).unwrap(),
+            None,
+            MakeDev::MAKEDEV_ETERNAL,
+        )
+        .unwrap();
 
         sys.register(586, &dmem, Self::sys_dmem_container);
         sys.register(653, &dmem, Self::sys_blockpool_open);
@@ -38,6 +81,7 @@ impl DmemManager {
             return Err(SysErr::Raw(EINVAL));
         }
 
-        todo!("sys_blockpool_open on new FS")
+        // todo!("sys_blockpool_open on new FS")
+        Ok(0.into())
     }
 }

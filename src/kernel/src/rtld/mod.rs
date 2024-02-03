@@ -15,6 +15,8 @@ use elf::{DynamicFlags, Elf, FileType, ReadProgramError, Relocation, Symbol};
 use gmtx::{Gutex, GutexGroup};
 use sha1::{Digest, Sha1};
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::collections::LinkedList;
 use std::io::Write;
 use std::mem::{size_of, zeroed};
 use std::num::NonZeroI32;
@@ -152,6 +154,7 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
 
         sys.register(591, &ld, Self::sys_dynlib_dlsym);
         sys.register(592, &ld, Self::sys_dynlib_get_list);
+        // sys.register(593, &ld, Self::sys_dynlib_get_info);
         sys.register(594, &ld, Self::sys_dynlib_load_prx);
         sys.register(596, &ld, Self::sys_dynlib_do_copy_relocations);
         sys.register(598, &ld, Self::sys_dynlib_get_proc_param);
@@ -160,6 +163,56 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         sys.register(649, &ld, Self::sys_dynlib_get_obj_member);
 
         Ok(ld)
+    }
+
+    pub fn init_libs(&self, md: &Arc<Module<E>>) -> () {
+        let list = self.list.read();
+        let mut deps = Vec::new();
+        // let mut to_init = Vec::new();
+        // for m in list.iter() {
+        for n in md.needed() {
+            if n.name != "libkernel.sprx" && n.name != "libkernel.prx" {
+                deps.push(n.name.to_owned())
+            }
+        }
+        //     if !m.flags().intersects(ModuleFlags::INIT_DONE) {
+        //         to_init.push(m);
+        //     }
+        // }
+
+        info!("processing {}", md.path().file_name().unwrap());
+
+        for dep in deps.iter() {
+            for m in list.iter() {
+                if m.names().contains(dep)
+                    && !m.flags().intersects(ModuleFlags::INIT_DONE)
+                    && m.init().is_some()
+                {
+                    let mut flags = m.flags_mut();
+                    info!("calling init for {}", m.path().file_name().unwrap());
+
+                    let offset = m.memory().addr() + m.memory().base() + m.init().unwrap();
+                    // unsafe {
+                    //     let fun = m.get_function(m.init().unwrap());
+                    //     fun.exec1::<()>(std::ptr::null());
+                    // }
+
+                    let fun_ptr = offset as *const ();
+                    let fun: extern "sysv64" fn(i64, i64, i64) =
+                        unsafe { std::mem::transmute(fun_ptr) };
+                    (fun)(0, 0, 0);
+
+                    *flags |= ModuleFlags::INIT_DONE;
+                    continue;
+                }
+            }
+            info!("dep {} left uninitialized", dep);
+        }
+
+        // info!("{:?}, {:?}", md.path().file_name().unwrap(), deps);
+
+        // for x in to_init.iter() {}
+        // info!("foo");
     }
 
     pub fn app(&self) -> &Arc<Module<E>> {
@@ -173,6 +226,51 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
     pub fn set_kernel(&self, md: Arc<Module<E>>) {
         *self.kernel.write() = Some(md);
     }
+
+    // pub fn load_needed_objects(&self, proc: &VProc, md: &mut Module<E>) -> Result<(), ()> {
+    //     for needed in md.needed() {
+    //         let obj = self.load(
+    //             proc,
+    //             unsafe { VPath::new_unchecked(needed.name.as_str()) },
+    //             LoadFlags::ZERO,
+    //             false,
+    //             false,
+    //         );
+
+    //         match obj {
+    //             Ok(module) => {
+    //                 // needed.module = Some(ModuleRef(module.clone()));
+    //                 self.init_dag(&module)
+    //             }
+    //             Err(err) => return Err(()),
+    //         }
+    //     }
+
+    //     return Ok(());
+    // }
+
+    // pub fn init_objects(&mut self) -> () {
+    //     let gg = GutexGroup::new();
+    //     let mut init_list = gg.spawn(vec![]);
+    //     let init_list_guard = init_list.get_mut();
+    //     for x in self.list.get_mut() {
+    //         if x.init_scanned || x.init_done {
+    //             continue;
+    //         }
+    //         // x.set_scanned(true);
+
+    //         for n in x.needed().iter_mut() {
+    //             if let Some(addr) = n.module.as_ref().and_then(|x| x.0.init()) {
+    //                 init_list_guard.push(addr);
+    //             }
+    //         }
+
+    //         if let Some(addr) = x.init() {
+    //             init_list_guard.push(addr);
+    //         }
+    //     }
+    //     ()
+    // }
 
     /// See `load_object`, `do_load_object` and `self_load_shared_object` on the PS4 for a
     /// reference.
@@ -301,9 +399,28 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
             return;
         }
 
+        // let mut donelist = HashSet::new();
+
         // Add the module itself as a first member of DAG.
         md.dag_static_mut().push(md.clone());
         md.dag_dynamic_mut().push(md.clone());
+
+        // for elem in md.dag_dynamic_mut().iter_mut() {
+        //     for needed in elem.needed() {
+        //         if needed.module.is_none() || !donelist.insert(needed.module.as_ref().unwrap()) {
+        //             continue;
+        //         }
+        //         needed
+        //             .module
+        //             .as_ref()
+        //             .unwrap()
+        //             .0
+        //             .dag_dynamic_mut()
+        //             .push(md.clone());
+        //         md.dag_static_mut()
+        //             .push(needed.module.as_ref().unwrap().0.clone())
+        //     }
+        // }
 
         // TODO: Apply the remaining logics from init_dag.
         *flags |= ModuleFlags::DAG_INITED;
@@ -551,6 +668,8 @@ impl<E: ExecutionEngine> RuntimeLinker<E> {
         let mut log = info!();
         writeln!(log, "Module {} is loaded with ID = {}.", name, md.id()).unwrap();
         md.print(log);
+
+        self.init_libs(&md);
 
         // Set module ID.
         unsafe { *Into::<*mut u32>::into(i.args[2]) = md.id() };
@@ -1084,6 +1203,7 @@ bitflags! {
     /// Flags for [`RuntimeLinker::load()`].
     #[derive(Clone, Copy)]
     pub struct LoadFlags: u32 {
+        const ZERO = 0x00;
         const UNK2 = 0x01;
         const BIG_APP = 0x20;
         const UNK1 = 0x40;

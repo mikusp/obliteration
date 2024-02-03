@@ -15,6 +15,7 @@ use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Privilege, Ucred};
+use crate::warn;
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup};
 use macros::vpath;
@@ -24,12 +25,11 @@ use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::num::{NonZeroI32, TryFromIntError};
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use thiserror::Error;
 
-mod dev;
+pub mod dev;
 mod dirent;
 mod file;
 mod host;
@@ -136,6 +136,7 @@ impl Fs {
         }
 
         // Install syscall handlers.
+        sys.register(3, &fs, Self::sys_read);
         sys.register(4, &fs, Self::sys_write);
         sys.register(5, &fs, Self::sys_open);
         sys.register(6, &fs, Self::sys_close);
@@ -177,10 +178,15 @@ impl Fs {
         // info!("self app {selfApp:?}");
         // info!("root {root1:?}");
 
+        let f = path.as_ref().as_str().to_owned();
+
         let file = self.lookup(path, td);
 
         match file {
-            Err(err) => Err(todo!("err {err}")),
+            Err(err) => {
+                info!("not found {:?}", f);
+                Err(OpenError::NotFound)
+            }
             Ok(vn) => Ok(VFile::new(
                 VFileType::Vnode(vn.clone()),
                 vn,
@@ -336,7 +342,6 @@ impl Fs {
         // Walk on path component.
         for (i, com) in path.components().enumerate() {
             // TODO: Handle link.
-            info!("vn {vn:?}");
             match vn.ty() {
                 VnodeType::Directory(_) => {
                     let mut item = vn.item_mut();
@@ -387,6 +392,19 @@ impl Fs {
 
     fn revoke<P: Into<VPathBuf>>(&self, _path: P) {
         // TODO: Implement this.
+    }
+
+    fn sys_read(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let ptr: *mut u8 = i.args[1].into();
+        let len: usize = i.args[2].try_into().unwrap();
+
+        let td = VThread::current().unwrap();
+        let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+        let buf = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        let read = file.read(buf, Some(&td))?;
+
+        Ok(read.into())
     }
 
     fn sys_write(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -456,7 +474,7 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            // todo!("open({path}) with flags & O_TRUNC");
         } else if mode != 0 {
             todo!("open({path}, {flags}) with mode = {mode}");
         }
@@ -513,7 +531,7 @@ impl Fs {
         };
 
         if com.is_in() {
-            todo!("ioctl with IOC_IN & != 0");
+            warn!("ioctl with IOC_IN & != 0: {com}");
         } else if com.is_out() {
             data.fill(0);
         }
@@ -803,11 +821,16 @@ impl Errno for MountError {
 
 /// Represents an error when [`Fs::open()`] was failed.
 #[derive(Debug, Error)]
-pub enum OpenError {}
+pub enum OpenError {
+    #[error("no such file or directory")]
+    NotFound,
+}
 
 impl Errno for OpenError {
     fn errno(&self) -> NonZeroI32 {
-        todo!()
+        match self {
+            Self::NotFound => ENOENT,
+        }
     }
 }
 

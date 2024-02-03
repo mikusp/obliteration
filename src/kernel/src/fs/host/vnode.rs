@@ -51,7 +51,6 @@ fn getattr(vn: &Arc<Vnode>) -> Result<VnodeAttrs, Box<dyn Errno>> {
 
 fn lookup(vn: &Arc<Vnode>, td: Option<&VThread>, name: &str) -> Result<Arc<Vnode>, Box<dyn Errno>> {
     // Check if directory.
-    info!("{vn:?} {td:?} {name}");
     match vn.ty() {
         VnodeType::Directory(root) => {
             if name == ".." && *root {

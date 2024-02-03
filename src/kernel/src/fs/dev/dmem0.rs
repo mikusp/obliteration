@@ -12,7 +12,7 @@ impl Dmem0 {
     pub const PATH: &VPath = vpath!("/dev/dmem0");
 
     pub fn new() -> Self {
-        Self {}
+        make_dev()
     }
 }
 
