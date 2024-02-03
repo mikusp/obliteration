@@ -9,6 +9,7 @@ pub(super) trait Storage: Debug {
     fn addr(&self) -> *mut u8;
     fn decommit(&self, addr: *mut u8, len: usize) -> Result<(), Error>;
     fn protect(&self, addr: *mut u8, len: usize, prot: Protections) -> Result<(), Error>;
+    fn name(&self, _name: &str) -> () {}
 }
 
 /// An implementation of [`Storage`] backed by the memory.
@@ -179,6 +180,11 @@ impl Storage for Memory {
         } else {
             Ok(())
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn name(&self, name: &str) -> () {
+        self.name(name);
     }
 }
 

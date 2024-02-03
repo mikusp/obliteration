@@ -328,7 +328,15 @@ impl MemoryManager {
     ) -> Result<(), MemoryUpdateError> {
         let name = name.as_ref();
 
-        self.update(addr, len, |i| i.name != name, |i| i.name = name.to_owned())
+        self.update(
+            addr,
+            len,
+            |i| i.name != name,
+            |i| {
+                i.name = name.to_owned();
+                i.storage.name(name);
+            },
+        )
     }
 
     /// See `vm_mmap` on the PS4 for a reference.
