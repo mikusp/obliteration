@@ -136,6 +136,7 @@ impl Fs {
         }
 
         // Install syscall handlers.
+        sys.register(3, &fs, Self::sys_read);
         sys.register(4, &fs, Self::sys_write);
         sys.register(5, &fs, Self::sys_open);
         sys.register(6, &fs, Self::sys_close);
@@ -387,6 +388,19 @@ impl Fs {
 
     fn revoke<P: Into<VPathBuf>>(&self, _path: P) {
         // TODO: Implement this.
+    }
+
+    fn sys_read(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let ptr: *mut u8 = i.args[1].into();
+        let len: usize = i.args[2].try_into().unwrap();
+
+        let td = VThread::current().unwrap();
+        let file = td.proc().files().get(fd).ok_or(SysErr::Raw(EBADF))?;
+        let buf = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+        let read = file.read(buf, Some(&td))?;
+
+        Ok(read.into())
     }
 
     fn sys_write(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
