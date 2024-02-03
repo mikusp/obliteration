@@ -16,6 +16,7 @@ use thiserror::Error;
 
 mod cdev;
 mod dirent;
+pub mod sblsrv;
 mod vnode;
 
 /// See `make_dev_credv` on the PS4 for a reference.

@@ -3,6 +3,7 @@ use crate::arnd::Arnd;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::dmem::DmemManager;
 use crate::ee::{EntryArg, RawFn};
+use crate::fs::dev::sblsrv::SblService;
 use crate::fs::Fs;
 use crate::llvm::Llvm;
 use crate::log::{print, LOGGER};
@@ -254,6 +255,8 @@ fn run<E: crate::ee::ExecutionEngine>(
 ) -> Result<(), KernelError> {
     // Initialize TTY system.
     let _tty = TtyManager::new(fs)?;
+
+    let _ = SblService::new();
 
     // Initialize kernel components.
     RegMgr::new(&mut syscalls);
