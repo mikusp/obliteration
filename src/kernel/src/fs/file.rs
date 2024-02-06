@@ -51,7 +51,7 @@ impl VFile {
         cmd: IoCmd,
         data: &mut [u8],
         td: Option<&VThread>,
-    ) -> Result<(), Box<dyn Errno>> {
+    ) -> Result<i64, Box<dyn Errno>> {
         (self.ops.ioctl)(self, cmd, data, td)
     }
 }
@@ -64,7 +64,7 @@ impl Seek for VFile {
 
 impl Read for VFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        info!("read VFile");
+        // info!("read VFile");
         Ok((self.ops.read)(self, buf, None).unwrap())
     }
 }
@@ -80,7 +80,7 @@ pub enum VFileType {
 pub struct VFileOps {
     pub read: fn(&VFile, &mut [u8], Option<&VThread>) -> Result<usize, Box<dyn Errno>>,
     pub write: fn(&VFile, &[u8], Option<&VThread>) -> Result<usize, Box<dyn Errno>>,
-    pub ioctl: fn(&VFile, IoCmd, &mut [u8], Option<&VThread>) -> Result<(), Box<dyn Errno>>,
+    pub ioctl: fn(&VFile, IoCmd, &mut [u8], Option<&VThread>) -> Result<i64, Box<dyn Errno>>,
     pub seek: fn(&VFile, SeekFrom, Option<&VThread>) -> Result<u64, Box<dyn Errno>>,
 }
 

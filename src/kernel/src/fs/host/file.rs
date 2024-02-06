@@ -13,7 +13,7 @@ pub struct HostFile {
 impl HostFile {
     pub fn open<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let path = path.into();
-        info!("HostFile::open {path:?}");
+        // info!("HostFile::open {path:?}");
         let raw = Self::raw_open(&path)?;
 
         Ok(Self { path, raw })

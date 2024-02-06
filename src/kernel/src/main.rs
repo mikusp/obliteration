@@ -1,10 +1,13 @@
+//#![feature(core_intrinsics)]
 use crate::arch::MachDep;
 use crate::arnd::Arnd;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::dmem::DmemManager;
 use crate::ee::{EntryArg, RawFn};
+use crate::fs::dev::dipsw::Dipsw;
 use crate::fs::dev::sblsrv::SblService;
 use crate::fs::Fs;
+use crate::gc::GcManager;
 use crate::llvm::Llvm;
 use crate::log::{print, LOGGER};
 use crate::memory::MemoryManager;
@@ -17,6 +20,7 @@ use crate::tty::TtyManager;
 use crate::ucred::{AuthAttrs, AuthCaps, AuthInfo, AuthPaid, Gid, Ucred, Uid};
 use clap::{Parser, ValueEnum};
 use fs::FsError;
+use libc::{memcpy, socket};
 use llt::{OsThread, SpawnError};
 use macros::vpath;
 use memory::MemoryManagerError;
@@ -26,10 +30,12 @@ use serde::Deserialize;
 use std::error::Error;
 use std::fs::{create_dir_all, remove_dir_all, File};
 use std::io::Write;
+use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::process::{ExitCode, Termination};
 use std::sync::Arc;
 use std::time::SystemTime;
+use syscalls::{SysErr, SysIn, SysOut};
 use sysinfo::{MemoryRefreshKind, System};
 use thiserror::Error;
 use tty::TtyInitError;
@@ -41,6 +47,7 @@ mod dmem;
 mod ee;
 mod errno;
 mod fs;
+mod gc;
 mod idt;
 mod llvm;
 mod log;
@@ -243,6 +250,59 @@ fn start() -> Result<(), KernelError> {
     }
 }
 
+struct SyscallsStubs {}
+
+impl SyscallsStubs {
+    fn stub(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        warn!("stubbed syscall {}", i.id);
+        Ok(0.into())
+    }
+
+    fn new(syscalls: &mut Syscalls) -> () {
+        let stubs = Arc::new(Self {});
+        syscalls.register(209, &stubs, |_, i| {
+            let nfds: usize = i.args[1].into();
+
+            Ok(nfds.into())
+        });
+        syscalls.register(232, &stubs, Self::stub);
+        syscalls.register(136, &stubs, Self::stub);
+        syscalls.register(480, &stubs, Self::stub);
+        // syscalls.register(628, &stubs, Self::stub);
+        syscalls.register(362, &stubs, Self::stub);
+        syscalls.register(612, &stubs, Self::stub);
+        syscalls.register(643, &stubs, Self::stub);
+        syscalls.register(74, &stubs, Self::stub);
+        syscalls.register(189, &stubs, Self::stub);
+        syscalls.register(482, &stubs, |_, i| {
+            let name: &str = unsafe { i.args[0].to_str(255)?.unwrap() };
+            info!("sys_shm_open({})", name);
+            Ok(666.into())
+        });
+        syscalls.register(97, &stubs, |_, i| {
+            let domain = i.args[0].try_into().unwrap();
+            let ty = i.args[1].try_into().unwrap();
+            let protocol = i.args[2].try_into().unwrap();
+            let fd = unsafe { socket(domain, ty, protocol) };
+
+            Ok(fd.into())
+        });
+        syscalls.register(98, &stubs, |_, _| Ok((-1).into()));
+        syscalls.register(99, &stubs, Self::stub);
+        syscalls.register(113, &stubs, Self::stub);
+        syscalls.register(114, &stubs, Self::stub);
+        syscalls.register(133, &stubs, |_, i| {
+            let len: usize = i.args[2].into();
+
+            Ok(len.into())
+        });
+        syscalls.register(116, &stubs, Self::stub);
+        syscalls.register(622, &stubs, Self::stub);
+        syscalls.register(550, &stubs, Self::stub);
+        syscalls.register(540, &stubs, Self::stub);
+    }
+}
+
 fn run<E: crate::ee::ExecutionEngine>(
     dump: Option<PathBuf>,
     param: &Arc<Param>,
@@ -256,6 +316,7 @@ fn run<E: crate::ee::ExecutionEngine>(
     // Initialize TTY system.
     let _tty = TtyManager::new(fs)?;
 
+    let dipsw = Dipsw::new();
     let _ = SblService::new();
 
     // Initialize kernel components.
@@ -264,6 +325,8 @@ fn run<E: crate::ee::ExecutionEngine>(
     let budget = BudgetManager::new(&mut syscalls);
     DmemManager::new(&fs, &mut syscalls);
     Sysctl::new(arnd, mm, &machdep, &mut syscalls);
+    SyscallsStubs::new(&mut syscalls);
+    GcManager::new();
 
     // TODO: Get correct budget name from the PS4.
     let budget_id = budget.create(Budget::new("big app", ProcType::BigApp));
@@ -333,6 +396,7 @@ fn run<E: crate::ee::ExecutionEngine>(
     // Get entry point.
     let boot = ld.kernel().unwrap();
     let mut arg = Box::pin(EntryArg::<E>::new(arnd, &proc, mm, app.clone()));
+    let stack = mm.stack();
     let entry = unsafe { boot.get_function(boot.entry().unwrap()) };
     let entry = move || unsafe { entry.exec1(arg.as_mut().as_vec().as_ptr()) };
 
@@ -348,7 +412,6 @@ fn run<E: crate::ee::ExecutionEngine>(
     ));
 
     let main = VThread::new(proc, &cred);
-    let stack = mm.stack();
     let main: OsThread = unsafe { main.start(stack.start(), stack.len(), entry) }?;
 
     // Begin Discord Rich Presence before blocking current thread.

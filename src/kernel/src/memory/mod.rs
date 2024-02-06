@@ -83,7 +83,9 @@ impl MemoryManager {
 
         sys.register(69, &mm, Self::sys_sbrk);
         sys.register(70, &mm, Self::sys_sstk);
+        sys.register(73, &mm, Self::sys_munmap);
         sys.register(477, &mm, Self::sys_mmap);
+        sys.register(628, &mm, Self::sys_mmap);
         sys.register(588, &mm, Self::sys_mname);
 
         Ok(mm)
@@ -182,7 +184,19 @@ impl MemoryManager {
                 Some(t)
             });
         } else if !flags.contains(MappingFlags::MAP_ANON) {
-            todo!("mmap with flags & 0x1000 = 0");
+            info!(
+                "mmap({:?}, {:?}, {:?}, {:?}, {:?}, {:?}, {:?})",
+                addr,
+                len,
+                prot,
+                "dupa", //name.into().to_owned(),
+                flags.0,
+                fd,
+                offset
+            );
+            flags |= MappingFlags::MAP_ANON;
+            // fd = -1;
+            // todo!("mmap with flags & 0x1000 = 0");
         }
 
         if flags.contains(MappingFlags::UNK1) {
@@ -556,6 +570,10 @@ impl MemoryManager {
         Err(SysErr::Raw(EOPNOTSUPP))
     }
 
+    fn sys_munmap(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        Ok(0.into())
+    }
+
     fn sys_mmap(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
         // Get arguments.
         let addr: usize = i.args[0].into();
@@ -764,6 +782,7 @@ bitflags! {
     #[repr(transparent)]
     #[derive(Clone, Copy)]
     pub struct MappingFlags: u32 {
+        const MAP_SHARED = 0x00000001;
         const MAP_PRIVATE = 0x00000002;
         const MAP_FIXED = 0x00000010;
         const MAP_NOEXTEND = 0x00000100;

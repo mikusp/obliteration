@@ -15,6 +15,7 @@ use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Privilege, Ucred};
+use crate::warn;
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup};
 use macros::vpath;
@@ -24,12 +25,11 @@ use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::num::{NonZeroI32, TryFromIntError};
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use thiserror::Error;
 
-mod dev;
+pub mod dev;
 mod dirent;
 mod file;
 mod host;
@@ -178,10 +178,15 @@ impl Fs {
         // info!("self app {selfApp:?}");
         // info!("root {root1:?}");
 
+        let f = path.as_ref().as_str().to_owned();
+
         let file = self.lookup(path, td);
 
         match file {
-            Err(err) => Err(todo!("err {err}")),
+            Err(err) => {
+                info!("not found {:?}", f);
+                Err(OpenError::NotFound)
+            }
             Ok(vn) => Ok(VFile::new(
                 VFileType::Vnode(vn.clone()),
                 vn,
@@ -228,7 +233,7 @@ impl Fs {
                                         )))
                                     }
                                     Host(hpath) => {
-                                        info!("reached host {hpath:?}");
+                                        // info!("reached host {hpath:?}");
                                         let mut pb = PathBuf::new();
                                         for (_, i) in hpath.components().enumerate() {
                                             pb.push(i);
@@ -237,7 +242,7 @@ impl Fs {
                                         for i in rest.split('/') {
                                             pb.push(i);
                                         }
-                                        info!("created path {pb:?}");
+                                        // info!("created path {pb:?}");
                                         hostMountPoint = Some(Host(pb));
                                         // hostMountPoint = Some(Host(PathBuf::from(
                                         //     VPath::new(
@@ -266,7 +271,7 @@ impl Fs {
                                         )))
                                     }
                                     Host(hpath) => {
-                                        info!("reached host {hpath:?}");
+                                        // info!("reached host {hpath:?}");
                                         let mut pb = PathBuf::new();
                                         for (_, i) in hpath.components().enumerate() {
                                             pb.push(i);
@@ -275,7 +280,7 @@ impl Fs {
                                         for i in rest.split('/') {
                                             pb.push(i);
                                         }
-                                        info!("created path {pb:?}");
+                                        // info!("created path {pb:?}");
                                         hostMountPoint = Some(Host(pb));
                                         // hostMountPoint = Some(Host(PathBuf::from(
                                         //     VPath::new(
@@ -297,11 +302,11 @@ impl Fs {
                 }
             }
 
-            match hostMountPoint {
-                Some(Bind(ref foo)) => info!("final {foo:?}"),
-                Some(Host(ref foo)) => info!("final2 {foo:?}"),
-                None => todo!("empty path"),
-            }
+            // match hostMountPoint {
+            //     Some(Bind(ref foo)) => info!("final {foo:?}"),
+            //     Some(Host(ref foo)) => info!("final2 {foo:?}"),
+            //     None => todo!("empty path"),
+            // }
         }
 
         // Get starting point.
@@ -337,7 +342,6 @@ impl Fs {
         // Walk on path component.
         for (i, com) in path.components().enumerate() {
             // TODO: Handle link.
-            info!("vn {vn:?}");
             match vn.ty() {
                 VnodeType::Directory(_) => {
                     let mut item = vn.item_mut();
@@ -470,12 +474,12 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            // todo!("open({path}) with flags & O_TRUNC");
         } else if mode != 0 {
             todo!("open({path}, {flags}) with mode = {mode}");
         }
 
-        info!("Opening {path} with flags = {flags}.");
+        // info!("Opening {path} with flags = {flags}.");
 
         // Lookup file.
         let td = VThread::current().unwrap();
@@ -486,7 +490,7 @@ impl Fs {
         // Install to descriptor table.
         let fd = td.proc().files().alloc(Arc::new(file));
 
-        info!("File descriptor {fd} was allocated for {path}.");
+        // info!("File descriptor {fd} was allocated for {path}.");
 
         Ok(fd.into())
     }
@@ -495,7 +499,7 @@ impl Fs {
         let td = VThread::current().unwrap();
         let fd: i32 = i.args[0].try_into().unwrap();
 
-        info!("Closing fd {fd}.");
+        // info!("Closing fd {fd}.");
 
         td.proc().files().free(fd)?;
 
@@ -527,7 +531,7 @@ impl Fs {
         };
 
         if com.is_in() {
-            todo!("ioctl with IOC_IN & != 0");
+            warn!("ioctl with IOC_IN & != 0: {com}");
         } else if com.is_out() {
             data.fill(0);
         }
@@ -544,7 +548,7 @@ impl Fs {
         }
 
         // Execute the operation.
-        info!("Executing ioctl({com}) on file descriptor {fd}.");
+        // info!("Executing ioctl({com}) on file descriptor {fd}.");
 
         match com {
             UNK_COM1 => todo!("ioctl with com = 0x20006601"),
@@ -817,11 +821,16 @@ impl Errno for MountError {
 
 /// Represents an error when [`Fs::open()`] was failed.
 #[derive(Debug, Error)]
-pub enum OpenError {}
+pub enum OpenError {
+    #[error("no such file or directory")]
+    NotFound,
+}
 
 impl Errno for OpenError {
     fn errno(&self) -> NonZeroI32 {
-        todo!()
+        match self {
+            Self::NotFound => ENOENT,
+        }
     }
 }
 

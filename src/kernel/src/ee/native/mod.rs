@@ -690,6 +690,16 @@ impl super::RawFn for RawFn {
 
     unsafe fn exec1<R, A>(&self, a: A) -> R {
         let f: unsafe extern "sysv64" fn(A) -> R = transmute(self.addr);
+//        if ::libc::ptrace(
+//            ::libc::PTRACE_TRACEME,
+//            0,
+//            std::ptr::null::<::libc::c_void>(),
+//            0,
+//        ) == -1
+//        {
+//            std::intrinsics::breakpoint();
+//        }
+
         f(a)
     }
 }

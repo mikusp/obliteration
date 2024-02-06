@@ -1,11 +1,14 @@
 use super::{CpuMask, CpuSet, VProc, NEXT_ID};
+use crate::ee::{EntryArg, ExecutionEngine};
 use crate::fs::VFile;
 use crate::signal::SignalSet;
 use crate::ucred::{Privilege, PrivilegeError, Ucred};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
+use libc::c_void;
 use llt::{OsThread, SpawnError};
 use std::num::NonZeroI32;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tls::{Local, Tls};

@@ -2,9 +2,10 @@ use super::dirent::Dirent;
 use super::{alloc_vnode, AllocVnodeError, Cdev, DevFs};
 use crate::errno::{Errno, EIO, ENOENT, ENOTDIR, ENXIO};
 use crate::fs::{
-    check_access, Access, OpenFlags, VFile, Vnode, VnodeAttrs, VnodeType, VopVector,
+    check_access, Access, IoCmd, OpenFlags, VFile, Vnode, VnodeAttrs, VnodeType, VopVector,
     DEFAULT_VNODEOPS,
 };
+use crate::info;
 use crate::process::VThread;
 use std::num::NonZeroI32;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ pub static CHARACTER_OPS: VopVector = VopVector {
     open: Some(open),
     read: None,
     write: None,
-    ioctl: Some(|_, _, _, _| Ok(())),
+    ioctl: Some(ioctl),
     seek: None,
 };
 
@@ -145,6 +146,12 @@ fn lookup(vn: &Arc<Vnode>, td: Option<&VThread>, name: &str) -> Result<Arc<Vnode
         };
     }
 
+    if name == "camera" {
+        return Err(Box::new(LookupError::AccessDenied(Box::new(
+            AllocVnodeError::DeviceGone,
+        ))));
+    }
+
     // Lookup.
     let item = match dirent.find(name, None) {
         Some(v) => {
@@ -190,6 +197,31 @@ fn open(
 
     // TODO: Implement remaining logics from the PS4.
     Ok(())
+}
+
+fn ioctl(
+    vn: &Arc<Vnode>,
+    td: Option<&VThread>,
+    cmd: IoCmd,
+    buf: &mut [u8],
+) -> Result<i64, Box<dyn Errno>> {
+    const UNK_COM1: IoCmd = IoCmd::ior::<i32>(0b10001000, 0b110);
+
+    match cmd {
+        UNK_COM1 => {
+            // info!("ioctl with cmd = 0x40048806");
+            // info!(
+            //     "ioctl size {} is in {} is out {}",
+            //     UNK_COM1.size(),
+            //     UNK_COM1.is_in(),
+            //     UNK_COM1.is_out()
+            // );
+            buf[0] = 1;
+        }
+        _ => info!("stubbed ioctl {}", cmd),
+    }
+
+    Ok(0.into())
 }
 
 /// Represents an error when [`lookup()`] is failed.

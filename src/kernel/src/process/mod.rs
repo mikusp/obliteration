@@ -117,6 +117,7 @@ impl VProc {
         sys.register(466, &vp, Self::sys_rtprio_thread);
         sys.register(487, &vp, Self::sys_cpuset_getaffinity);
         sys.register(557, &vp, Self::sys_namedobj_create);
+        sys.register(558, &vp, Self::sys_namedobj_delete);
         sys.register(585, &vp, Self::sys_is_in_sandbox);
         sys.register(587, &vp, Self::sys_get_authinfo);
         sys.register(601, &vp, Self::sys_mdbg_service);
@@ -572,6 +573,10 @@ impl VProc {
         );
 
         Ok(id.into())
+    }
+
+    fn sys_namedobj_delete(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {
+        Ok(0.into())
     }
 
     fn sys_is_in_sandbox(self: &Arc<Self>, _: &SysIn) -> Result<SysOut, SysErr> {

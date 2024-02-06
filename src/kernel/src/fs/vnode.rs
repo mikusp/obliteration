@@ -132,9 +132,9 @@ impl Vnode {
     pub fn ioctl(
         self: &Arc<Self>,
         cmd: IoCmd,
-        buf: &[u8],
+        buf: &mut [u8],
         td: Option<&VThread>,
-    ) -> Result<(), Box<dyn Errno>> {
+    ) -> Result<i64, Box<dyn Errno>> {
         self.get_op(|v| v.ioctl)(self, td, cmd, buf)
     }
 
@@ -204,7 +204,8 @@ pub type VopOpen =
     fn(&Arc<Vnode>, Option<&VThread>, OpenFlags, Option<&mut VFile>) -> Result<(), Box<dyn Errno>>;
 pub type VopRead = fn(&Arc<Vnode>, Option<&VThread>, &mut [u8]) -> Result<usize, Box<dyn Errno>>;
 pub type VopWrite = fn(&Arc<Vnode>, Option<&VThread>, &[u8]) -> Result<usize, Box<dyn Errno>>;
-pub type VopIoctl = fn(&Arc<Vnode>, Option<&VThread>, IoCmd, &[u8]) -> Result<(), Box<dyn Errno>>;
+pub type VopIoctl =
+    fn(&Arc<Vnode>, Option<&VThread>, IoCmd, &mut [u8]) -> Result<i64, Box<dyn Errno>>;
 pub type VopSeek = fn(&Arc<Vnode>, Option<&VThread>, SeekFrom) -> Result<u64, Box<dyn Errno>>;
 
 /// An implementation of `vattr` struct.
