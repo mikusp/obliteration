@@ -5,6 +5,7 @@ use super::{
 use crate::errno::{Errno, ENOTDIR, ENOTTY, EOPNOTSUPP, EPERM};
 use crate::process::VThread;
 use crate::ucred::{Gid, Uid};
+use crate::{error, info};
 use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
 use macros::Errno;
 use std::any::Any;
@@ -131,7 +132,14 @@ impl FileBackend for Vnode {
         buf: &mut UioMut,
         td: Option<&VThread>,
     ) -> Result<usize, Box<dyn Errno>> {
-        todo!()
+        // if let Some(vn) = self {
+        //     info!("vnode_filebackend_read {:?}", self);
+        //     return self.backend.clone().read(&vn, buf, td);
+        // }
+
+        let foo = self.backend.clone().read(self, buf, td);
+
+        panic!("null vnode")
     }
 
     #[allow(unused_variables)] // TODO: remove when implementing
@@ -272,6 +280,19 @@ pub(super) trait VnodeBackend: Debug + Send + Sync + 'static {
         #[allow(unused_variables)] file: Option<&mut VFile>,
     ) -> Result<(), Box<dyn Errno>> {
         Ok(())
+    }
+
+    // An implementation of `vop_read`.
+    fn read(
+        self: Arc<Self>,
+        vn: &Arc<Vnode>,
+        _uio: &mut UioMut,
+        td: Option<&VThread>,
+    ) -> Result<usize, Box<dyn Errno>> {
+        error!("vop_read for {:?}", self);
+        error!("vop_read for {:?}", vn);
+        panic!("vop_read");
+        Err(Box::new(DefaultError::NotSupported))
     }
 
     /// An implementation of `vop_revoke`.

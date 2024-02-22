@@ -1,6 +1,10 @@
 use self::node::{AllocNodeError, Node, Nodes};
-use super::{Filesystem, FsConfig, Mount, MountFlags, MountOpts, MountSource, VPathBuf, Vnode};
+use super::{
+    FileBackend, Filesystem, FsConfig, Mount, MountFlags, MountOpts, MountSource, VFile, VPathBuf,
+    Vnode,
+};
 use crate::errno::{Errno, EINVAL};
+use crate::process::VThread;
 use crate::ucred::{Ucred, Uid};
 use std::num::NonZeroI32;
 use std::sync::atomic::AtomicI32;
@@ -142,6 +146,16 @@ impl crate::fs::vnode::VnodeBackend for VnodeBackend {
                 lower: self.lower.clone(),
             },
         ))
+    }
+
+    fn read(
+        self: Arc<Self>,
+        vn: &Arc<Vnode>,
+        uio: &mut super::UioMut,
+        td: Option<&VThread>,
+    ) -> Result<usize, Box<dyn Errno>> {
+        panic!("read tmpfs");
+        // vn.read(self.lower, buf, td)
     }
 }
 

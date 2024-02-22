@@ -11,6 +11,7 @@ use macros::Errno;
 use param::Param;
 use std::fmt::{Display, Formatter};
 use std::num::{NonZeroI32, TryFromIntError};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use thiserror::Error;
@@ -796,7 +797,9 @@ impl Fs {
             }
         }
 
-        todo!()
+        *file.offset_mut() = offset;
+
+        return Ok(offset.into());
     }
 
     fn sys_truncate(self: &Arc<Self>, i: &SysIn) -> Result<SysOut, SysErr> {

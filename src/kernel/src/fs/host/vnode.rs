@@ -118,6 +118,15 @@ impl crate::fs::VnodeBackend for VnodeBackend {
     ) -> Result<(), Box<dyn Errno>> {
         todo!()
     }
+
+    fn read(
+        self: Arc<Self>,
+        _vn: &Arc<Vnode>,
+        _uio: &mut crate::fs::UioMut,
+        td: Option<&VThread>,
+    ) -> Result<usize, Box<dyn Errno>> {
+        todo!()
+    }
 }
 
 /// Represents an error when [`getattr()`] fails.

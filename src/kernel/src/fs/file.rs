@@ -2,11 +2,13 @@ use super::{Cdev, IoCmd, Offset, Stat, TruncateLength, Uio, UioMut, Vnode};
 use crate::dmem::BlockPool;
 use crate::errno::Errno;
 use crate::errno::{EINVAL, ENOTTY, ENXIO, EOPNOTSUPP};
+use crate::error;
 use crate::kqueue::KernelQueue;
 use crate::net::Socket;
 use crate::process::VThread;
 use crate::shm::Shm;
 use bitflags::bitflags;
+use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
 use macros::Errno;
 use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -16,15 +18,18 @@ use thiserror::Error;
 /// An implementation of `file` structure.
 #[derive(Debug)]
 pub struct VFile {
-    ty: VFileType,     // f_type
-    flags: VFileFlags, // f_flag
+    ty: VFileType,      // f_type
+    flags: VFileFlags,  // f_flag
+    offset: Gutex<i64>, // f_offset
 }
 
 impl VFile {
     pub(super) fn new(ty: VFileType) -> Self {
+        let gg = GutexGroup::new();
         Self {
             ty,
             flags: VFileFlags::empty(),
+            offset: gg.spawn(0),
         }
     }
 
@@ -36,8 +41,15 @@ impl VFile {
         &mut self.flags
     }
 
+    pub fn offset_mut(&self) -> GutexWriteGuard<'_, i64> {
+        self.offset.write()
+    }
+
     pub fn vnode(&self) -> Option<Arc<Vnode>> {
-        todo!()
+        match self.ty {
+            VFileType::Vnode(ref vn) => Some(vn.clone()),
+            _ => None,
+        }
     }
 
     /// See `dofileread` on the PS4 for a reference.
@@ -147,14 +159,33 @@ impl VFile {
 }
 
 impl Seek for VFile {
-    fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
-        todo!("seek")
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let mut new_offset = 0;
+        match pos {
+            SeekFrom::Start(off) => {
+                new_offset = off;
+                *self.offset_mut() = off.try_into().unwrap()
+            }
+            _ => todo!(),
+        }
+
+        return Ok(new_offset);
     }
 }
 
 impl Read for VFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        todo!()
+        let mut uio = UioMut {
+            vecs: [].as_mut_slice(),
+            bytes_left: 0,
+        };
+        self.vnode()
+            .unwrap()
+            .read(&self, &mut uio, None)
+            .map_err(|x| {
+                error!("{}", x);
+                todo!()
+            })
     }
 }
 
