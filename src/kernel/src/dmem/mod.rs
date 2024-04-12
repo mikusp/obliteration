@@ -1,3 +1,4 @@
+use crate::budget::ProcType;
 use crate::dev::{Dmem, DmemContainer};
 use crate::errno::EINVAL;
 use crate::fs::{
@@ -133,18 +134,40 @@ impl DmemManager {
             return Err(SysErr::Raw(EINVAL));
         }
 
-        let bp = BlockPool::new();
+        let dmem_container = *td.proc().dmem_container();
+        let unk =
+            dmem_container == DmemContainer::Zero && td.proc().budget_ptype() > ProcType::MiniApp;
 
-        let flags = VFileFlags::from_bits_retain(flags) | VFileFlags::WRITE;
+        let start = (unk as usize) << 37;
+        let end = (unk as usize) << 38 | 0x1000000000;
 
-        let fd = td
-            .proc()
-            .files()
-            .alloc(Arc::new(VFile::new(VFileType::Blockpool(bp), flags)));
+        let dev = &self[dmem_container];
 
-        info!("Opened a blockpool at fd = {fd}");
+        let addr = self.get_addr(dev, start);
+
+        //todo: manage budgets?
+
+        let blockpool = Arc::new(BlockPool {
+            dmem_container,
+            ptype: td.proc().budget_ptype(),
+            start,
+            end,
+            addr,
+        });
+
+        let mut file = VFile::new(VFileType::Blockpool(blockpool), VFileFlags::WRITE);
+
+        let fd = td.proc().files().alloc(Arc::new(file));
 
         Ok(fd.into())
+    }
+
+    fn get_addr(self: &Arc<Self>, dev: &DmemDevice, start: usize) -> usize {
+        if start < 0x1000000000 {
+            return start + 0x100000;
+        } else {
+            todo!();
+        }
     }
 
     fn sys_blockpool_map(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {

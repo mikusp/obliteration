@@ -200,6 +200,10 @@ impl VProc {
         &self.uptc
     }
 
+    pub fn sdk_ver(&self) -> Option<u32> {
+        (&self.bin().as_ref().map(|bin| bin.app().sdk_ver())).clone()
+    }
+
     fn sys_sigprocmask(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         // Get arguments.
         let how: How = {

@@ -1,14 +1,68 @@
-use crate::errno::Errno;
+use crate::budget::ProcType;
+use crate::dev::DmemContainer;
+use crate::errno::{Errno, EINVAL, ENOMEM};
 use crate::fs::{DefaultFileBackendError, FileBackend, IoCmd, PollEvents, Stat, VFile};
+use crate::info;
 use crate::process::VThread;
+use crate::syscalls::SysErr;
+use crate::vm::PhysAddr;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub struct BlockPool {}
+pub struct BlockPool {
+    pub dmem_container: DmemContainer,
+    pub ptype: ProcType,
+    pub start: usize,
+    pub end: usize,
+    pub addr: usize,
+}
 
 impl BlockPool {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {})
+    // pub fn new() -> Arc<Self> {
+    //     Arc::new(Self {})
+    // }
+
+    fn expand(
+        self: &Arc<Self>,
+        len: i64,
+        search_start: usize,
+        search_end: usize,
+        align: usize,
+        td: Option<&VThread>,
+    ) -> Result<Option<PhysAddr>, SysErr> {
+        if len as i16 != 0 || align & 0x1f000000 != align {
+            return Err(SysErr::Raw(EINVAL));
+        }
+
+        let unk_align = if align == 0 {
+            0x10
+        } else {
+            if align < 0x10000000 {
+                return Err(SysErr::Raw(EINVAL));
+            } else {
+                align >> 0x18
+            }
+        };
+
+        if len == 0 {
+            return Ok(None);
+        } else if len < 0 {
+            return Err(SysErr::Raw(ENOMEM));
+        } else {
+            // adjust search and start according to data in the vfile
+            td.unwrap()
+                .proc()
+                .vm()
+                .dmem()
+                .allocate(
+                    search_start,
+                    search_end,
+                    len as usize,
+                    1 << (unk_align & 0x3f),
+                )
+                .map(|addr| Some(addr))
+            // do more bookkeeping from blockpool_ioctl
+        }
     }
 }
 
@@ -21,7 +75,23 @@ impl FileBackend for BlockPool {
         td: Option<&VThread>,
     ) -> Result<(), Box<dyn Errno>> {
         match cmd {
-            IoCmd::BPOOLEXPAND(args) => todo!(),
+            IoCmd::BPOOLEXPAND(args) => {
+                match self.expand(
+                    args.len,
+                    args.search_start,
+                    args.search_end,
+                    args.alignment,
+                    td,
+                ) {
+                    Ok(phys_addr) => {
+                        phys_addr.map(|addr| {
+                            args.search_start = addr.0;
+                        });
+                        Ok(())
+                    }
+                    Err(err) => todo!(),
+                }
+            }
             IoCmd::BPOOLSTATS(out) => todo!(),
             _ => Err(Box::new(DefaultFileBackendError::IoctlNotSupported)),
         }
@@ -45,7 +115,7 @@ impl FileBackend for BlockPool {
 #[repr(C)]
 #[derive(Debug)]
 pub struct BlockpoolExpandArgs {
-    len: usize,
+    len: i64,
     search_start: usize,
     search_end: usize,
     alignment: usize,

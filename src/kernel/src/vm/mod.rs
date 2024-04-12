@@ -4,16 +4,31 @@ pub use self::stack::*;
 use self::iter::StartFromMut;
 use self::storage::Storage;
 use crate::dev::DmemContainer;
+use crate::errno::EAGAIN;
 use crate::errno::{Errno, EINVAL, ENOMEM, EOPNOTSUPP};
+use crate::error;
+use crate::fs::VFile;
+use crate::fs::VFileType;
+use crate::process::GetFileError;
 use crate::process::VThread;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::{info, warn};
 use bitflags::bitflags;
+use bitflags::Flags;
+use gmtx::Gutex;
+use gmtx::GutexGroup;
+use iced_x86::code_asm::al;
+use libc::malloc;
+use libc::MAP_FIXED;
+use libc::MAP_SHARED;
 use macros::Errno;
+use std::cmp::max;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fmt::{Display, Formatter};
+use std::mem;
 use std::num::TryFromIntError;
+use std::os::raw::c_void;
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
@@ -28,6 +43,7 @@ mod storage;
 pub struct Vm {
     allocation_granularity: usize,
     allocations: RwLock<BTreeMap<usize, Mapping>>, // Key is Alloc::addr.
+    dmem: Arc<DmemAllocator>,
     stack: AppStack,
 }
 
@@ -50,9 +66,13 @@ impl Vm {
             return Err(MemoryManagerError::UnsupportedPageSize);
         }
 
+        let dmem_allocator =
+            DmemAllocator::new().map_err(|_| MemoryManagerError::UnsupportedPageSize)?;
+
         let mut mm = Self {
             allocation_granularity,
             allocations: RwLock::default(),
+            dmem: dmem_allocator,
             stack: AppStack::new(),
         };
 
@@ -99,6 +119,14 @@ impl Vm {
         &self.stack
     }
 
+    pub fn dmem(&self) -> &Arc<DmemAllocator> {
+        &self.dmem
+    }
+
+    fn round_page(addr: usize) -> usize {
+        (addr + 0x3fff) & !(0x3fff)
+    }
+
     pub fn mmap<N: Into<String>>(
         &self,
         addr: usize,
@@ -109,11 +137,23 @@ impl Vm {
         fd: i32,
         offset: usize,
     ) -> Result<VPages<'_>, MmapError> {
+        let name = name.into();
+        info!(
+            "mmap({:#x}, {:#x}, {}, {}, {}, {}, {:#x})",
+            addr,
+            len,
+            prot,
+            name.clone(),
+            flags,
+            fd,
+            offset
+        );
+
         // Remove unknown protections.
         let prot = prot.intersection(Protections::all());
 
         // TODO: Check why the PS4 check RBP register.
-        if flags.contains(MappingFlags::UNK1) {
+        if flags.contains(MappingFlags::MAP_SANITIZER) {
             todo!("mmap with flags & 0x200000");
         }
 
@@ -142,7 +182,18 @@ impl Vm {
         }
 
         if flags.contains(MappingFlags::MAP_FIXED) {
-            todo!("mmap with flags & 0x10");
+            let pageoff = offset & 0x3fff;
+            let adjusted_addr = addr - pageoff;
+            let adjusted_len = len + pageoff;
+            let rounded_len = Self::round_page(adjusted_len);
+
+            if (adjusted_addr & 0x3fff) != 0 {
+                return Err(MmapError::InvalidOffset);
+            }
+            // TODO: check if addr is within min and max mappings for this proc
+            if adjusted_addr + rounded_len < adjusted_addr {
+                return Err(MmapError::InvalidOffset);
+            }
         } else if addr == 0 {
             if td
                 .as_ref()
@@ -156,6 +207,7 @@ impl Vm {
             todo!("mmap with addr = 0x880000000");
         }
 
+        let mut file_handle = None;
         if flags.contains(MappingFlags::MAP_VOID) {
             flags |= MappingFlags::MAP_ANON;
 
@@ -163,10 +215,18 @@ impl Vm {
                 td.set_fpop(None);
             }
         } else if !flags.contains(MappingFlags::MAP_ANON) {
-            todo!("mmap with flags & 0x1000 = 0");
+            if let Some(ref td) = td {
+                let file = td
+                    .proc()
+                    .files()
+                    .get(fd)
+                    .map_err(|err| MmapError::InvalidFd(err))?;
+                td.set_fpop(Some(file.clone()));
+                file_handle = Some(file);
+            }
         }
 
-        if flags.contains(MappingFlags::UNK1) {
+        if flags.contains(MappingFlags::MAP_SANITIZER) {
             todo!("mmap with flags & 0x200000 != 0");
         }
 
@@ -180,7 +240,7 @@ impl Vm {
             r => len + (Self::VIRTUAL_PAGE_SIZE - r),
         };
 
-        self.map(addr, len, prot, name.into())
+        self.map(addr, len, flags, prot, name, file_handle, offset as i64)
     }
 
     fn mlock(&self, addr: usize, len: usize) -> Result<(), SysErr> {
@@ -344,14 +404,18 @@ impl Vm {
         &self,
         addr: usize,
         len: usize,
+        mut flags: MappingFlags,
         prot: Protections,
         name: String,
+        file_handle: Option<Arc<VFile>>,
+        file_offset: i64,
     ) -> Result<VPages<'_>, MmapError> {
         // TODO: Check what is PS4 doing here.
         use std::collections::btree_map::Entry;
 
         // Do allocation.
         let addr = (addr + 0x3fff) & 0xffffffffffffc000;
+        let size = (len + 0x3fff) & 0xffffffffffffc000;
         let alloc = match self.alloc(addr, len, prot, name) {
             Ok(v) => v,
             Err(e) => {
@@ -363,6 +427,41 @@ impl Vm {
                 }
             }
         };
+
+        if let Some(ref vfile) = file_handle {
+            match &vfile.ty {
+                VFileType::Blockpool(bp) => {
+                    if file_offset != 0 {
+                        return Err(MmapError::InvalidOffset);
+                    }
+
+                    if flags.bits() & 0x1f000000 == 0 {
+                        flags = flags & MappingFlags::from_bits_retain(0xe0ffffff);
+                        flags |= MappingFlags::from_bits_retain(0x15000000)
+                    } else if flags.bits() & 0x1f000000 < 0x15000000 {
+                        return Err(MmapError::InvalidFlags(1));
+                    }
+
+                    if flags.bits() & 3 != 1 || prot.bits() & 0x33 != 0x33 {
+                        info!("flags {} vfile {:?} prot {}", flags, vfile.flags(), prot);
+                        return Err(MmapError::InvalidFlags(2));
+                    }
+
+                    if ((flags.bits() & 0x10 != 0)
+                        && (addr & 0x1fffff != 0
+                            || (addr < 0xff0000000 && (0x7efffffff < addr + size))))
+                        || (len + 0x3fff) & 0xffffffffffe00000 != size
+                    {
+                        return Err(MmapError::InvalidFlags(3));
+                    }
+
+                    let area = self.pager_allocate(vfile, size, Protections::RW, 0);
+
+                    todo!()
+                }
+                _ => todo!(),
+            }
+        }
 
         // Store allocation info.
         let mut allocs = self.allocations.write().unwrap();
@@ -547,6 +646,88 @@ impl Vm {
         })
     }
 
+    fn pager_allocate(
+        &self,
+        handle: &Arc<VFile>,
+        size: usize,
+        prot: Protections,
+        unk: usize,
+    ) -> Option<usize> {
+        info!(
+            "pager_allocate({:?}, {:#x}, {}, {})",
+            handle, size, prot, unk
+        );
+
+        let td = &VThread::current();
+
+        match &handle.ty {
+            VFileType::Blockpool(bp) => {
+                let mut sdk_ver = None;
+                if td.is_none()
+                    || td
+                        .as_ref()
+                        .clone()
+                        .and_then(|t| t.proc().sdk_ver())
+                        .unwrap_or(0)
+                        > 0x4ffffff
+                {
+                    if 0x7fffffffffff < size {
+                        return None;
+                    }
+
+                    sdk_ver = td.as_ref().unwrap().proc().sdk_ver();
+                } else if 0x3fff < (size >> 16) {
+                    return None;
+                }
+
+                let mut proc = None;
+                if sdk_ver.map(|v| v > 0x5ffffff).unwrap_or(false) {
+                    proc = Some(td.as_ref().unwrap().proc());
+                }
+
+                let unk1 = (size >> 16) * 4 + 0xffff;
+                let unk2 = unk1 >> 16;
+                let memory: Vec<u8> = Vec::with_capacity((unk2 << 32) >> 30);
+
+                let ret = self.blockpool_flush(handle, unk2 & 0xffffffff, 1, 1, &memory);
+
+                if ret != 0 {
+                    return None;
+                }
+
+                let unk3 = (unk2 << 32) >> 16;
+                let mut ptr: Vec<u8> = Vec::with_capacity(unk3);
+
+                if (unk1 >> 16) > 0 {
+                    todo!()
+                }
+
+                drop(memory);
+                ptr.fill(0);
+
+                let obj = self.self_pager_alloc(handle, size >> 14);
+
+                todo!()
+            }
+            _ => todo!(),
+        }
+    }
+
+    fn self_pager_alloc(&self, vfile: &Arc<VFile>, size: usize) -> () {
+        todo!()
+    }
+
+    fn blockpool_flush(
+        &self,
+        vfile: &Arc<VFile>,
+        blocks: usize,
+        b: usize,
+        c: usize,
+        d: &Vec<u8>,
+    ) -> i32 {
+        0
+    }
+
     fn sys_sbrk(self: &Arc<Self>, _: &VThread, _: &SysIn) -> Result<SysOut, SysErr> {
         // Return EOPNOTSUPP (Not yet implemented syscall)
         Err(SysErr::Raw(EOPNOTSUPP))
@@ -718,6 +899,7 @@ impl Vm {
                         arg.prot.try_into().unwrap(),
                         flags,
                         arg.offset,
+                        td,
                     )?;
                 }
                 BatchMapOp::MapFlexible => {
@@ -792,7 +974,7 @@ impl Vm {
     }
 
     #[allow(unused_variables)]
-    fn sys_mmap_dmem(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    fn sys_mmap_dmem(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let start_addr: usize = i.args[0].into();
         let len: usize = i.args[1].into();
         let mem_type: MemoryType = i.args[2].try_into().unwrap();
@@ -800,20 +982,68 @@ impl Vm {
         let flags: MappingFlags = i.args[4].try_into().unwrap();
         let start_phys_addr: usize = i.args[5].into();
 
-        self.mmap_dmem_internal(start_addr, len, mem_type, prot, flags, start_phys_addr)
+        self.mmap_dmem_internal(start_addr, len, mem_type, prot, flags, start_phys_addr, td)
     }
 
     #[allow(unused_variables)]
     fn mmap_dmem_internal(
         self: &Arc<Self>,
-        start_addr: usize,
+        mut start_addr: usize,
         len: usize,
         mem_type: MemoryType,
         prot: Protections,
         flags: MappingFlags,
         start_phys_addr: usize,
+        td: &VThread,
     ) -> Result<SysOut, SysErr> {
-        todo!()
+        //todo: check creds
+        warn!(
+            "sys_mmap_dmem({:#x}, {:#x}, {:?}, {}, {}, {:#x})",
+            start_addr, len, mem_type, prot, flags, start_phys_addr
+        );
+
+        if *td.proc().dmem_container() != DmemContainer::One {
+            return Err(SysErr::Raw(EOPNOTSUPP));
+        }
+
+        if start_addr & 0x3fff != 0
+            || start_phys_addr & 0x3fff != 0
+            || (flags.bits() & 0xe09fff6f | prot.bits() & 0xffffffcc) != 0
+            || len < 0x3fff
+            || len & 0x3fff != 0
+        {
+            return Err(SysErr::Raw(EINVAL));
+        }
+
+        if flags.intersects(MappingFlags::MAP_SANITIZER) {
+            todo!()
+        }
+
+        //todo: check rbp as on ps4
+
+        let mut unk = 0;
+
+        if !flags.intersects(MappingFlags::MAP_FIXED) {
+            if start_addr == 0 {
+                warn!("faking start_addr in sys_mmap_dmem");
+                start_addr = 0x100000;
+            } else if start_addr <= 0xff0000000 {
+                todo!()
+            }
+            let unk1 = flags.bits() >> 24 & 0x1f;
+            if unk1 > 0xd {
+                unk = unk1;
+            } else {
+                unk = 1;
+            }
+        } else {
+        }
+
+        td.proc()
+            .vm()
+            .dmem()
+            .mmap(start_addr, len, mem_type, prot, PhysAddr(start_phys_addr))
+            .map(|x| x.into())
     }
 
     fn align_virtual_page(ptr: *mut u8) -> *mut u8 {
@@ -882,6 +1112,7 @@ bitflags! {
         const GPU_READ = 0x00000010;
         const GPU_WRITE = 0x00000020;
         const GPU_MASK = Self::GPU_READ.bits() | Self::GPU_WRITE.bits();
+        const RW = Self::CPU_READ.bits() | Self::CPU_WRITE.bits() | Self::GPU_READ.bits() | Self::GPU_WRITE.bits();
     }
 }
 
@@ -960,15 +1191,21 @@ bitflags! {
     #[repr(transparent)]
     #[derive(Clone, Copy)]
     pub struct MappingFlags: u32 {
+        const MAP_SHARED = 0x00000001;
         const MAP_PRIVATE = 0x00000002;
         const MAP_FIXED = 0x00000010;
+        const MAP_NO_OVERWRITE = 0x00000080;
         const MAP_VOID = 0x00000100;
         const MAP_STACK = 0x00000400;
+        const MAP_DMEM_COMPAT = 0x00000400;
         const MAP_ANON = 0x00001000;
         const MAP_GUARD = 0x00002000;
         const UNK2 = 0x00010000;
+        const MAP_NOCORE = 0x00020000;
         const UNK3 = 0x00100000;
-        const UNK1 = 0x00200000;
+        const MAP_SANITIZER = 0x00200000;
+        const MAP_NO_COALESCE = 0x00400000;
+        const MAP_WRITABLE_WB_GARLIC = 0x00800000;
     }
 }
 
@@ -1014,9 +1251,16 @@ pub enum MmapError {
     #[errno(EINVAL)]
     InvalidOffset,
 
+    #[error("invalid flags {0}")]
+    #[errno(EINVAL)]
+    InvalidFlags(i32),
+
     #[error("no memory available for {0} bytes")]
     #[errno(ENOMEM)]
     NoMem(usize),
+
+    #[error("file descriptor is invalid")]
+    InvalidFd(#[from] GetFileError),
 }
 
 /// Errors for [`MemoryManager::munmap()`].
@@ -1082,30 +1326,355 @@ impl TryFrom<i32> for BatchMapOp {
 }
 
 #[repr(i32)]
+#[derive(Debug)]
 enum MemoryType {
     WbOnion = 0,
     WcGarlic = 3,
     WbGarlic = 10,
+    Unk(u8),
+    Any = -1,
 }
 
 impl TryFrom<SysArg> for MemoryType {
-    type Error = TryFromIntError;
+    type Error = SysErr;
 
     fn try_from(value: SysArg) -> Result<Self, Self::Error> {
-        let val: u8 = value.try_into().unwrap();
-        val.try_into()
+        warn!("{:#x}", value.get());
+        if value.get() as u32 == !(0u32) {
+            Ok(MemoryType::Any)
+        } else {
+            let val: u8 = value.try_into().unwrap();
+            val.try_into()
+        }
     }
 }
 
 impl TryFrom<u8> for MemoryType {
-    type Error = TryFromIntError;
+    type Error = SysErr;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(MemoryType::WbOnion),
             3 => Ok(MemoryType::WcGarlic),
             10 => Ok(MemoryType::WbGarlic),
-            _ => unreachable!(),
+            i if i == !0 => Ok(MemoryType::Any),
+            i if i < 10 => Ok(MemoryType::Unk(i)),
+            _ => Err(SysErr::Raw(EINVAL)),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct DmemAllocator {
+    allocations: Gutex<Vec<DmemAllocation>>,
+    mappings: Gutex<Vec<DmemMapping>>,
+    memfd: memfd::Memfd,
+    size: usize,
+}
+
+// #[derive(Debug)]
+// struct HugePage {
+//     virt_addr: usize,
+//     phys_addr: usize,
+// }
+
+#[derive(Debug, PartialOrd, PartialEq, Ord, Eq, Clone, Copy)]
+pub struct PhysAddr(pub usize);
+
+#[derive(Debug)]
+struct DmemAllocation {
+    phys_addr: PhysAddr,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct DmemMapping {
+    virt_addr: usize,
+    len: usize,
+    prot: Protections,
+    mem_type: MemoryType,
+    phys_addr: PhysAddr,
+}
+
+impl DmemAllocator {
+    pub fn new() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let gg = GutexGroup::new();
+        let opts = memfd::MemfdOptions::default().allow_sealing(true);
+        let mfd = opts.create("dmem")?;
+
+        mfd.as_file().set_len(0x13C_000_000)?;
+
+        // Add seals to prevent further resizing.
+        mfd.add_seals(&[memfd::FileSeal::SealShrink, memfd::FileSeal::SealGrow])?;
+
+        // Prevent further sealing changes.
+        mfd.add_seal(memfd::FileSeal::SealSeal)?;
+
+        Ok(Arc::new(Self {
+            allocations: gg.spawn(Vec::new()),
+            mappings: gg.spawn(Vec::new()),
+            memfd: mfd,
+            size: 0x13C_000_000,
+        }))
+    }
+
+    pub fn allocate(
+        self: &Arc<Self>,
+        search_start: usize,
+        search_end: usize,
+        len: usize,
+        align: usize,
+    ) -> Result<PhysAddr, SysErr> {
+        let mut allocations = self.allocations.write();
+
+        if allocations.is_empty() {
+            let phys_addr = PhysAddr(search_start);
+            let alloc = DmemAllocation { phys_addr, len };
+
+            allocations.push(alloc);
+
+            Ok(phys_addr)
+        } else if allocations.len() == 1 {
+            info!("allocate: one allocation");
+            let allocation = allocations.last().unwrap();
+
+            let mut candidate = search_start
+                + (search_start as *const c_void).align_offset(if align == 0 {
+                    0x4000
+                } else {
+                    align
+                });
+
+            loop {
+                info!(
+                    "allocate: candidate {:#x}, len {:#x}, alloc_start {:#x}",
+                    candidate, len, allocation.phys_addr.0
+                );
+
+                if candidate + len < allocation.phys_addr.0
+                    || (candidate >= (allocation.phys_addr.0 + allocation.len)
+                        && (candidate + len) < search_end)
+                {
+                    let phys_addr = PhysAddr(candidate);
+                    let alloc = DmemAllocation { phys_addr, len };
+
+                    allocations.push(alloc);
+                    allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+
+                    return Ok(phys_addr);
+                }
+                if candidate >= search_end {
+                    return Err(SysErr::Raw(ENOMEM));
+                }
+
+                candidate = candidate + if align == 0 { 0x4000 } else { align };
+            }
+            // let candidate = last_allocation.phys_addr.0 + last_allocation.len;
+            // let aligned_candidate = candidate
+            //     + (candidate as *const c_void).align_offset(if align == 0 {
+            //         0x4000
+            //     } else {
+            //         align
+            //     });
+
+            // if aligned_candidate + len < search_end {
+            //     let phys_addr = PhysAddr(aligned_candidate);
+            //     let alloc = DmemAllocation { phys_addr, len };
+
+            //     allocations.push(alloc);
+
+            //     Ok(phys_addr)
+            // } else {
+            //     warn!("allocations: {:?}", *allocations);
+            //     warn!(
+            //         "allocate: aligned_candidate={:#x}, len={:#x}, search_end={:#x}",
+            //         aligned_candidate, len, search_end
+            //     );
+            //     todo!()
+            // }
+        } else {
+            // first try at the beginning of the area
+            info!("allocate: trying at the beginning");
+            let allocation = allocations.first().unwrap();
+
+            let mut candidate = search_start
+                + (search_start as *const c_void).align_offset(if align == 0 {
+                    0x4000
+                } else {
+                    align
+                });
+
+            loop {
+                if candidate + len < allocation.phys_addr.0 {
+                    let phys_addr = PhysAddr(candidate);
+                    let alloc = DmemAllocation { phys_addr, len };
+
+                    allocations.push(alloc);
+                    allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+
+                    return Ok(phys_addr);
+                }
+                if candidate >= allocation.phys_addr.0 {
+                    break;
+                }
+
+                candidate = candidate + if align == 0 { 0x4000 } else { align };
+            }
+
+            // now in between mappings
+            for w in allocations.windows(2) {
+                let i = &w[0];
+                let j = &w[1];
+                info!("allocate: looking for space between {:?} and {:?}", i, j);
+                let start = i.phys_addr.0 + len;
+                let candidate = start
+                    + (start as *const c_void).align_offset(if align == 0 {
+                        0x4000
+                    } else {
+                        align
+                    });
+
+                if candidate < j.phys_addr.0 && (candidate + len) < j.phys_addr.0 {
+                    let phys_addr = PhysAddr(candidate);
+                    let alloc = DmemAllocation { phys_addr, len };
+
+                    allocations.push(alloc);
+                    allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+
+                    return Ok(phys_addr);
+                } else {
+                    continue;
+                }
+            }
+
+            // no space in between existing mappings, check after all
+            let last_allocation = allocations.last().unwrap();
+
+            let mut candidate = last_allocation.phys_addr.0
+                + (last_allocation.phys_addr.0 as *const c_void).align_offset(if align == 0 {
+                    0x4000
+                } else {
+                    align
+                });
+
+            if candidate + len < last_allocation.phys_addr.0 {
+                let phys_addr = PhysAddr(candidate);
+                let alloc = DmemAllocation { phys_addr, len };
+
+                allocations.push(alloc);
+
+                return Ok(phys_addr);
+            }
+
+            Err(SysErr::Raw(EAGAIN))
+        }
+    }
+
+    pub fn mmap(
+        self: &Arc<Self>,
+        addr: usize,
+        len: usize,
+        mem_type: MemoryType,
+        prot: Protections,
+        phys_addr: PhysAddr,
+    ) -> Result<usize, SysErr> {
+        info!("Dmem::mmap()");
+
+        /// make sure the area is allocated
+        for i in &*self.allocations.read() {
+            if phys_addr >= i.phys_addr && (phys_addr.0 + len) <= (i.phys_addr.0 + i.len) {
+                use std::os::fd::AsRawFd;
+
+                let ret = unsafe {
+                    libc::mmap(
+                        addr as *mut c_void,
+                        len,
+                        prot.into_host(),
+                        MAP_SHARED | MAP_FIXED,
+                        self.memfd.as_raw_fd(),
+                        phys_addr.0 as i64,
+                    )
+                };
+
+                let mapping = DmemMapping {
+                    virt_addr: ret as usize,
+                    len,
+                    prot,
+                    mem_type,
+                    phys_addr,
+                };
+
+                info!("Dmem::mmap(): {:?}", mapping);
+
+                self.mappings.write().push(mapping);
+
+                return Ok(ret as usize);
+            }
+        }
+
+        Err(SysErr::Raw(EAGAIN))
+    }
+
+    pub fn get_avail(
+        self: &Arc<Self>,
+        dmem_container: DmemContainer,
+        search_start: usize,
+        search_end: usize,
+        align: usize,
+    ) -> Result<(PhysAddr, usize), SysErr> {
+        let mut largest_area = (PhysAddr(0), 0);
+
+        let align = max(align, 0x4000);
+
+        let allocations = self.allocations.write();
+
+        for w in allocations.windows(2) {
+            let i = &w[0];
+            let j = &w[1];
+
+            info!("looking for space between {:?} and {:?}", i, j);
+
+            if (i.phys_addr.0 + i.len) < search_start {
+                continue;
+            }
+            if (i.phys_addr.0 + i.len) > search_end {
+                break;
+            }
+
+            let candidate = (i.phys_addr.0 + i.len)
+                + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
+
+            let size = j.phys_addr.0 - candidate;
+            info!("candidate {:#x}, size {:#x}", candidate, size);
+
+            if size > largest_area.1 {
+                largest_area = (PhysAddr(candidate), size);
+            }
+        }
+
+        let end_area = {
+            allocations.last().and_then(|i| {
+                let candidate = (i.phys_addr.0 + i.len)
+                    + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
+
+                info!("candidate at the end {:#x}", candidate);
+
+                if search_end > candidate {
+                    Some((PhysAddr(candidate), search_end - candidate))
+                } else {
+                    None
+                }
+            })
+        };
+
+        Ok(end_area
+            .and_then(|end| {
+                if end.1 > largest_area.1 {
+                    Some(end)
+                } else {
+                    Some(largest_area)
+                }
+            })
+            .unwrap_or(largest_area))
     }
 }

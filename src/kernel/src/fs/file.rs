@@ -18,7 +18,7 @@ use thiserror::Error;
 /// An implementation of `file` structure.
 #[derive(Debug)]
 pub struct VFile {
-    ty: VFileType,      // f_type
+    pub ty: VFileType,  // f_type
     flags: VFileFlags,  // f_flag
     offset: Gutex<i64>, // f_offset
 }
