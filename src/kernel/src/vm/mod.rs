@@ -20,8 +20,6 @@ use bitflags::bitflags;
 use bitflags::Flags;
 use gmtx::Gutex;
 use gmtx::GutexGroup;
-use libc::MAP_FIXED;
-use libc::MAP_SHARED;
 use macros::Errno;
 use std::cmp::max;
 use std::collections::BTreeMap;

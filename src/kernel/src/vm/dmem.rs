@@ -82,7 +82,7 @@ impl DmemInterface {
                 (size >> 32) as u32,
                 size as u32,
                 ptr::null(),
-            );
+            )
         };
 
         if handle == 0 {
@@ -131,5 +131,57 @@ impl DmemInterface {
         } else {
             None
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn map(
+        &self,
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        phys_addr: PhysAddr,
+    ) -> Option<usize> {
+        use crate::info;
+        use std::os::raw::c_void;
+        use windows_sys::Win32::System::Memory::{MapViewOfFileEx, FILE_MAP_READ, FILE_MAP_WRITE};
+
+        info!(
+            "DmemInterface::map({:#x}, {:#x}, {}, {:#x})",
+            addr, len, prot, phys_addr.0
+        );
+
+        let protection_flags = match prot {
+            Protections::CPU_READ => FILE_MAP_READ,
+            Protections::CPU_WRITE | Protections::RW => FILE_MAP_WRITE,
+            _ => todo!(),
+        };
+
+        let ret = unsafe {
+            MapViewOfFileEx(
+                self.handle,
+                protection_flags,
+                (phys_addr.0 >> 32) as u32,
+                (phys_addr.0 & 0xFFFF_FFFF) as u32,
+                len as usize,
+                addr as *const c_void,
+            )
+        };
+
+        if ret.Value != ptr::null_mut() {
+            Some(ret.Value as _)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn map(
+        &self,
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        phys_addr: PhysAddr,
+    ) -> Option<usize> {
+        todo!()
     }
 }
