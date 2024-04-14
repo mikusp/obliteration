@@ -117,8 +117,7 @@ impl DeviceDriver for Dmem {
                 let (phys_addr, size) = td
                     .proc()
                     .vm()
-                    .dmem()
-                    .get_avail(dmem_container, start, avail.end, avail.align)
+                    .get_avail_dmem(dmem_container, start, avail.end, avail.align)
                     .map_err(|_| IoctlErr::InvalidParameters)?;
 
                 info!("dmem_get_avail: addr {:#x}, size {:#x}", phys_addr.0, size);
@@ -130,8 +129,7 @@ impl DeviceDriver for Dmem {
                 let phys_addr = td
                     .proc()
                     .vm()
-                    .dmem()
-                    .allocate(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
+                    .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
                     .map_err(|_| IoctlErr::InvalidParameters)?;
 
                 alloc.start_or_phys_out = phys_addr.0
@@ -140,8 +138,7 @@ impl DeviceDriver for Dmem {
                 let phys_addr = td
                     .proc()
                     .vm()
-                    .dmem()
-                    .allocate(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
+                    .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
                     .map_err(|_| IoctlErr::InvalidParameters)?;
 
                 alloc.start_or_phys_out = phys_addr.0

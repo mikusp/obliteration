@@ -123,7 +123,7 @@ impl Memory {
         let obcode = segments.len();
         let segment = MemorySegment {
             start: len,
-            len: (1024 * 1024) * 4,
+            len: (1024 * 1024) * 16,
             program: None,
             prot: Protections::CPU_READ | Protections::CPU_EXEC,
         };

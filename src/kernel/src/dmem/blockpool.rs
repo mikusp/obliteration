@@ -30,6 +30,8 @@ impl BlockPool {
         align: usize,
         td: Option<&VThread>,
     ) -> Result<Option<PhysAddr>, SysErr> {
+        info!("BlockPool::expand({len:#x}, {search_start:#x}, {search_end:#x}, {align:#x})");
+
         if len as i16 != 0 || align & 0x1f000000 != align {
             return Err(SysErr::Raw(EINVAL));
         }
@@ -53,8 +55,7 @@ impl BlockPool {
             td.unwrap()
                 .proc()
                 .vm()
-                .dmem()
-                .allocate(
+                .allocate_dmem(
                     search_start,
                     search_end,
                     len as usize,
@@ -89,7 +90,7 @@ impl FileBackend for BlockPool {
                         });
                         Ok(())
                     }
-                    Err(err) => todo!(),
+                    Err(err) => Err(Box::new(DefaultFileBackendError::InvalidValue)),
                 }
             }
             IoCmd::BPOOLSTATS(out) => todo!(),

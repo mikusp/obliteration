@@ -9,6 +9,7 @@ use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Gid, Uid};
+use crate::vm::{MemoryType, Protections};
 use std::ops::Index;
 use std::sync::Arc;
 use thiserror::Error;
@@ -173,16 +174,17 @@ impl DmemManager {
     fn sys_blockpool_map(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let addr: usize = i.args[0].into();
         let len: usize = i.args[1].into();
-        let mem_type: i32 = i.args[2].try_into().unwrap();
-        let protections: u32 = i.args[3].try_into().unwrap();
+        let mem_type: MemoryType = i.args[2].try_into().unwrap();
+        let protections: Protections = i.args[3].try_into().unwrap();
         let flags: i32 = i.args[4].try_into().unwrap();
 
         info!(
-            "sys_blockpool_map({}, {}, {}, {}, {})",
+            "sys_blockpool_map({:#x}, {:#x}, {:?}, {}, {})",
             addr, len, mem_type, protections, flags
         );
 
-        todo!()
+        // todo!()
+        Ok(SysOut::ZERO)
     }
 
     fn sys_blockpool_unmap(self: &Arc<Self>, _: &VThread, _i: &SysIn) -> Result<SysOut, SysErr> {

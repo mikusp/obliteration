@@ -391,7 +391,7 @@ impl Fs {
 
         let iovec = unsafe { IoVec::try_from_raw_parts(ptr, len) }?;
 
-        todo!()
+        Ok(len.into())
     }
 
     fn sys_open(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {

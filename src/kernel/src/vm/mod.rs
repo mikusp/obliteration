@@ -1,7 +1,10 @@
+pub use self::dmem::*;
 pub use self::page::*;
 pub use self::stack::*;
 
+use self::dmem::*;
 use self::iter::StartFromMut;
+use self::storage::Memory;
 use self::storage::Storage;
 use crate::dev::DmemContainer;
 use crate::errno::EAGAIN;
@@ -17,22 +20,21 @@ use bitflags::bitflags;
 use bitflags::Flags;
 use gmtx::Gutex;
 use gmtx::GutexGroup;
-use iced_x86::code_asm::al;
-use libc::malloc;
 use libc::MAP_FIXED;
 use libc::MAP_SHARED;
 use macros::Errno;
 use std::cmp::max;
 use std::collections::BTreeMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
-use std::mem;
+use std::io::Error;
 use std::num::TryFromIntError;
 use std::os::raw::c_void;
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
+mod dmem;
 mod iter;
 mod page;
 mod stack;
@@ -42,10 +44,20 @@ mod storage;
 #[derive(Debug)]
 pub struct Vm {
     allocation_granularity: usize,
-    allocations: RwLock<BTreeMap<usize, Mapping>>, // Key is Alloc::addr.
+    dmem_allocations: RwLock<BTreeMap<PhysAddr, DmemAllocation>>,
+    allocations: RwLock<BTreeMap<usize, Memory>>, // Key is DmemAllocation::phys_addr
+    mappings: RwLock<BTreeMap<usize, Mapping>>,   // Key is Mapping::addr.
     dmem: Arc<DmemAllocator>,
     stack: AppStack,
 }
+
+#[derive(Debug)]
+pub enum Addr {
+    VirtAddr(usize),
+    PhysAddr(PhysAddr),
+}
+
+pub struct VmObject {}
 
 impl Vm {
     /// Size of a memory page on PS4.
@@ -71,7 +83,9 @@ impl Vm {
 
         let mut mm = Self {
             allocation_granularity,
+            dmem_allocations: RwLock::default(),
             allocations: RwLock::default(),
+            mappings: RwLock::default(),
             dmem: dmem_allocator,
             stack: AppStack::new(),
         };
@@ -121,6 +135,294 @@ impl Vm {
 
     pub fn dmem(&self) -> &Arc<DmemAllocator> {
         &self.dmem
+    }
+
+    pub fn allocate_dmem(
+        &self,
+        search_start: usize,
+        search_end: usize,
+        len: usize,
+        align: usize,
+    ) -> Result<PhysAddr, SysErr> {
+        let mut allocations = self.dmem_allocations.write().unwrap();
+
+        info!(
+            "Vm::allocate_dmem({:#x}, {:#x}, {:#x}, {:#x})",
+            search_start, search_end, len, align
+        );
+
+        if allocations.is_empty() {
+            let phys_addr = PhysAddr(search_start);
+            let alloc = DmemAllocation { phys_addr, len };
+
+            allocations.insert(phys_addr, alloc);
+
+            Ok(phys_addr)
+        } else if allocations.len() == 1 {
+            info!("allocate: one allocation");
+            let entry = allocations.last_entry().unwrap();
+            let allocation = entry.get();
+
+            let mut candidate = search_start
+                + (search_start as *const c_void).align_offset(if align == 0 {
+                    0x4000
+                } else {
+                    align
+                });
+
+            loop {
+                info!(
+                    "allocate: candidate {:#x}, len {:#x}, alloc_start {:#x}",
+                    candidate, len, allocation.phys_addr.0
+                );
+
+                if candidate + len < allocation.phys_addr.0
+                    || (candidate >= (allocation.phys_addr.0 + allocation.len)
+                        && (candidate + len) < search_end)
+                {
+                    let phys_addr = PhysAddr(candidate);
+                    let alloc = DmemAllocation { phys_addr, len };
+
+                    allocations.insert(phys_addr, alloc);
+                    // allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+
+                    return Ok(phys_addr);
+                }
+                if candidate >= search_end {
+                    return Err(SysErr::Raw(ENOMEM));
+                }
+
+                candidate = candidate + if align == 0 { 0x4000 } else { align };
+            }
+            // let candidate = last_allocation.phys_addr.0 + last_allocation.len;
+            // let aligned_candidate = candidate
+            //     + (candidate as *const c_void).align_offset(if align == 0 {
+            //         0x4000
+            //     } else {
+            //         align
+            //     });
+
+            // if aligned_candidate + len < search_end {
+            //     let phys_addr = PhysAddr(aligned_candidate);
+            //     let alloc = DmemAllocation { phys_addr, len };
+
+            //     allocations.push(alloc);
+
+            //     Ok(phys_addr)
+            // } else {
+            //     warn!("allocations: {:?}", *allocations);
+            //     warn!(
+            //         "allocate: aligned_candidate={:#x}, len={:#x}, search_end={:#x}",
+            //         aligned_candidate, len, search_end
+            //     );
+            //     todo!()
+            // }
+        } else {
+            // first try at the beginning of the area
+            info!("allocate: trying at the beginning");
+            let entry = allocations.first_entry().unwrap();
+            let allocation = entry.get();
+
+            let mut candidate = search_start
+                + (search_start as *const c_void).align_offset(if align == 0 {
+                    0x4000
+                } else {
+                    align
+                });
+
+            loop {
+                if candidate + len < allocation.phys_addr.0 {
+                    let phys_addr = PhysAddr(candidate);
+                    let alloc = DmemAllocation { phys_addr, len };
+
+                    allocations.insert(phys_addr, alloc);
+                    // allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+
+                    return Ok(phys_addr);
+                }
+                if candidate >= allocation.phys_addr.0 {
+                    break;
+                }
+
+                candidate = candidate + if align == 0 { 0x4000 } else { align };
+            }
+
+            // now in between mappings
+            let c = allocations.clone();
+            let mut iter = c.iter();
+            iter.next();
+            let mut alloc_clone = allocations.clone();
+            let first_entry = alloc_clone.first_entry().unwrap();
+            let res = iter.try_fold(first_entry.get(), |i, j_| {
+                // let i = &w[0];
+                // let j = &w[1];
+                let j = j_.1;
+                info!("allocate: looking for space between {:?} and {:?}", i, j);
+                let start = i.phys_addr.0 + len;
+                let candidate = start
+                    + (start as *const c_void).align_offset(if align == 0 {
+                        0x4000
+                    } else {
+                        align
+                    });
+
+                if candidate < j.phys_addr.0 && (candidate + len) < j.phys_addr.0 {
+                    let phys_addr = PhysAddr(candidate);
+                    let alloc = DmemAllocation { phys_addr, len };
+
+                    allocations.insert(phys_addr, alloc);
+                    // allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+
+                    Err(phys_addr)
+                } else {
+                    Ok(j)
+                }
+            });
+
+            if let Err(phys_addr) = res {
+                return Ok(phys_addr);
+            }
+
+            // no space in between existing mappings, check after all
+            let entry = allocations.last_entry().unwrap();
+            let last_allocation = entry.get();
+
+            let mut candidate = last_allocation.phys_addr.0
+                + (last_allocation.phys_addr.0 as *const c_void).align_offset(if align == 0 {
+                    0x4000
+                } else {
+                    align
+                });
+
+            if candidate + len < last_allocation.phys_addr.0 {
+                let phys_addr = PhysAddr(candidate);
+                let alloc = DmemAllocation { phys_addr, len };
+
+                allocations.insert(phys_addr, alloc);
+
+                return Ok(phys_addr);
+            }
+
+            Err(SysErr::Raw(EAGAIN))
+        }
+    }
+
+    pub fn mmap_dmem(
+        &self,
+        addr: usize,
+        len: usize,
+        mem_type: MemoryType,
+        prot: Protections,
+        phys_addr: PhysAddr,
+    ) -> Result<usize, SysErr> {
+        info!("Dmem::mmap()");
+
+        /// make sure the area is allocated
+        for i in self.dmem_allocations.read().unwrap().values().into_iter() {
+            if phys_addr >= i.phys_addr && (phys_addr.0 + len) <= (i.phys_addr.0 + i.len) {
+                let addr = self.find_free_area(addr, len)?;
+
+                let virt_addr = self
+                    .dmem
+                    .native_dmem
+                    .map(addr, len, prot, phys_addr)
+                    .ok_or(SysErr::Raw(ENOMEM))?;
+
+                let mapping = Mapping {
+                    addr: virt_addr as _,
+                    len,
+                    prot,
+                    name: "".to_string(),
+                    storage: Arc::new(*i),
+                    locked: false,
+                    mem_type: Some(mem_type),
+                };
+
+                info!("Dmem::mmap(): {:?}", mapping);
+
+                self.mappings.write().unwrap().insert(virt_addr, mapping);
+
+                return Ok(virt_addr);
+            }
+        }
+        error!("mmap_dmem failed, {:#x} is not allocated?", phys_addr.0);
+
+        Err(SysErr::Raw(EAGAIN))
+    }
+
+    pub fn get_avail_dmem(
+        &self,
+        dmem_container: DmemContainer,
+        search_start: usize,
+        search_end: usize,
+        align: usize,
+    ) -> Result<(PhysAddr, usize), SysErr> {
+        let mut largest_area = (PhysAddr(0), 0);
+
+        let align = max(align, 0x4000);
+
+        let mut allocations = self.dmem_allocations.write().unwrap();
+
+        if allocations.is_empty() {
+            return Ok((PhysAddr(0), self.dmem.size));
+        }
+
+        let c = allocations.clone();
+        let mut iter = c.iter();
+        iter.next();
+        let mut alloc_clone = allocations.clone();
+        let first_entry = alloc_clone.first_entry().unwrap();
+        let res = iter.try_fold(first_entry.get(), |i, j_| {
+            // let i = &w[0];
+            // let j = &w[1];
+            let j = j_.1;
+
+            info!("looking for space between {:?} and {:?}", i, j);
+
+            if (i.phys_addr.0 + i.len) < search_start {
+                return Ok(j);
+            }
+            if (i.phys_addr.0 + i.len) > search_end {
+                return Err(());
+            }
+
+            let candidate = (i.phys_addr.0 + i.len)
+                + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
+
+            let size = j.phys_addr.0 - candidate;
+            info!("candidate {:#x}, size {:#x}", candidate, size);
+
+            if size > largest_area.1 {
+                largest_area = (PhysAddr(candidate), size);
+            }
+            Ok(j)
+        });
+
+        let end_area = {
+            allocations.last_entry().and_then(|e| {
+                let i = e.get();
+                let candidate = (i.phys_addr.0 + i.len)
+                    + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
+
+                info!("candidate at the end {:#x}", candidate);
+
+                if search_end > candidate {
+                    Some((PhysAddr(candidate), search_end - candidate))
+                } else {
+                    None
+                }
+            })
+        };
+
+        Ok(end_area
+            .and_then(|end| {
+                if end.1 > largest_area.1 {
+                    Some(end)
+                } else {
+                    Some(largest_area)
+                }
+            })
+            .unwrap_or(largest_area))
     }
 
     fn round_page(addr: usize) -> usize {
@@ -270,7 +572,7 @@ impl Vm {
         let end = Self::align_virtual_page(unsafe { addr.add(len) });
         let mut adds: Vec<Mapping> = Vec::new();
         let mut removes: Vec<usize> = Vec::new();
-        let mut allocs = self.allocations.write().unwrap();
+        let mut allocs = self.mappings.write().unwrap();
 
         // FIXME: In theory it is possible to make this more efficient by remove allocation
         // info in-place. Unfortunately Rust does not provides API to achieve what we want.
@@ -293,6 +595,7 @@ impl Vm {
                         name: info.name.clone(),
                         storage: info.storage.clone(),
                         locked: false,
+                        mem_type: None,
                     });
 
                     (end as usize) - (addr as usize)
@@ -328,6 +631,7 @@ impl Vm {
                     name: info.name.clone(),
                     storage: info.storage.clone(),
                     locked: false,
+                    mem_type: None,
                 });
             } else {
                 // Unmap the whole allocation.
@@ -391,12 +695,49 @@ impl Vm {
             |i| i.name != name,
             |i| {
                 if let Ok(name) = &sname {
-                    let _ = i.storage.set_name(i.addr, i.len, name);
+                    let _ = i.set_name(i.addr, i.len, name);
                 }
 
                 i.name = name.to_owned();
             },
         )
+    }
+
+    fn find_free_area(&self, addr: usize, len: usize) -> Result<usize, MmapError> {
+        let mappings = self.mappings.read().unwrap();
+
+        let addr = if addr == 0 { 0x400000 } else { addr };
+
+        if mappings.is_empty() {
+            return Ok(addr);
+        }
+
+        let mut previous_end = 0x400000; // try minimum mapping
+        for i in mappings.range(addr..).into_iter() {
+            // info!("find_free_area: trying {:?}", i);
+            // if addr > *i.0 || addr < previous_end {
+            //     previous_end = (i.1.end() as usize + 0x3fff) & 0xffffffffffffc000;
+            //     continue;
+            // }
+
+            // assert!(addr >= previous_end, "{:#x}, {:#x}", addr, previous_end);
+
+            if i.0 - previous_end > len && previous_end >= addr {
+                // info!(
+                //     "found free area at {:#x} starting from {:#x}",
+                //     previous_end, addr
+                // );
+                return Ok(previous_end);
+            }
+
+            previous_end = (i.1.end() as usize + 0x3fff) & 0xffffffffffffc000;
+        }
+
+        error!(
+            "couldn't find area from {:#x} of {:#x} bytes (end of allocated area {:#x})",
+            addr, len, previous_end
+        );
+        Ok(max(addr, previous_end))
     }
 
     /// See `vm_mmap` on the PS4 for a reference.
@@ -416,6 +757,13 @@ impl Vm {
         // Do allocation.
         let addr = (addr + 0x3fff) & 0xffffffffffffc000;
         let size = (len + 0x3fff) & 0xffffffffffffc000;
+
+        let addr = if flags.intersects(MappingFlags::MAP_FIXED) {
+            addr
+        } else {
+            self.find_free_area(addr, len)?
+        };
+        // info!("found addr {:#x}", addr);
         let alloc = match self.alloc(addr, len, prot, name) {
             Ok(v) => v,
             Err(e) => {
@@ -455,22 +803,36 @@ impl Vm {
                         return Err(MmapError::InvalidFlags(3));
                     }
 
-                    let area = self.pager_allocate(vfile, size, Protections::RW, 0);
+                    // let area = self.pager_allocate(vfile, size, Protections::RW, flags, 0);
 
+                    // todo!()
+                }
+                VFileType::Device(cdev) => {
+                    if cdev.name() == "gc" {
+                        // nothing for now
+                    } else if cdev.name() == "dmem1" {
+                        // nothing
+                    } else {
+                        todo!("{}", cdev.name())
+                    }
+                }
+                _ => {
+                    error!("unhandled {:?}", &vfile.ty);
                     todo!()
                 }
-                _ => todo!(),
             }
         }
 
         // Store allocation info.
-        let mut allocs = self.allocations.write().unwrap();
-        let alloc = match allocs.entry(alloc.addr as usize) {
-            Entry::Occupied(e) => panic!("Address {:p} is already allocated.", e.key()),
+        let mut mappings = self.mappings.write().unwrap();
+        let mapping = match mappings.entry(alloc.addr as usize) {
+            Entry::Occupied(e) => {
+                panic!("Address {:p} is already allocated. {:?}", e.key(), e)
+            }
             Entry::Vacant(e) => e.insert(alloc),
         };
 
-        Ok(VPages::new(self, alloc.addr, alloc.len))
+        Ok(VPages::new(self, mapping.addr, mapping.len))
     }
 
     fn update<F, U>(
@@ -498,9 +860,9 @@ impl Vm {
         let end = Self::align_virtual_page(unsafe { addr.add(len) });
         let mut prev: *mut u8 = null_mut();
         let mut targets: Vec<&mut Mapping> = Vec::new();
-        let mut allocs = self.allocations.write().unwrap();
+        let mut mappings = self.mappings.write().unwrap();
 
-        for (_, info) in StartFromMut::new(&mut allocs, first) {
+        for (_, info) in StartFromMut::new(&mut mappings, first) {
             valid_addr = true;
 
             // Stop if the allocation is out of range.
@@ -548,6 +910,7 @@ impl Vm {
                     name: info.name.clone(),
                     storage: storage.clone(),
                     locked: false,
+                    mem_type: None,
                 };
 
                 update(&mut alloc);
@@ -562,6 +925,7 @@ impl Vm {
                         name: info.name.clone(),
                         storage: storage.clone(),
                         locked: false,
+                        mem_type: None,
                     });
                 }
 
@@ -579,6 +943,7 @@ impl Vm {
                     name: info.name.clone(),
                     storage: storage.clone(),
                     locked: false,
+                    mem_type: None,
                 });
 
                 update(info);
@@ -591,7 +956,7 @@ impl Vm {
         // Add new allocation to the set.
         for alloc in adds {
             let addr = alloc.addr;
-            assert!(allocs.insert(addr as usize, alloc).is_none());
+            assert!(mappings.insert(addr as usize, alloc).is_none());
         }
 
         Ok(())
@@ -616,15 +981,15 @@ impl Vm {
             let storage = Memory::new(addr, len)?;
 
             // Do the second allocation.
-            let addr = Self::align_virtual_page(storage.addr());
-            let len = len - ((addr as usize) - (storage.addr() as usize));
+            let addr = Self::align_virtual_page(storage.ptr());
+            let len = len - ((addr as usize) - (storage.ptr() as usize));
 
             (addr, len, storage)
         } else {
             // If allocation granularity is equal or larger than the virtual page that mean the
             // result of mmap will always aligned correctly.
             let storage = Memory::new(addr, len)?;
-            let addr = storage.addr();
+            let addr = storage.ptr();
 
             (addr, len, storage)
         };
@@ -632,18 +997,22 @@ impl Vm {
         storage.commit(addr, len, prot)?;
 
         // Set storage name if supported.
-        if let Ok(name) = CString::new(name.as_str()) {
-            let _ = storage.set_name(addr, len, &name);
-        }
 
-        Ok(Mapping {
+        let mapping = Mapping {
             addr,
             len,
             prot,
-            name,
+            name: name.clone(),
             storage: Arc::new(storage),
             locked: false,
-        })
+            mem_type: None,
+        };
+
+        if let Ok(name) = CString::new(name.as_str()) {
+            let _ = mapping.set_name(addr, len, &name);
+        }
+
+        Ok(mapping)
     }
 
     fn pager_allocate(
@@ -651,6 +1020,7 @@ impl Vm {
         handle: &Arc<VFile>,
         size: usize,
         prot: Protections,
+        flags: MappingFlags,
         unk: usize,
     ) -> Option<usize> {
         info!(
@@ -699,22 +1069,33 @@ impl Vm {
                 let mut ptr: Vec<u8> = Vec::with_capacity(unk3);
 
                 if (unk1 >> 16) > 0 {
-                    todo!()
+                    // todo!()
                 }
 
                 drop(memory);
                 ptr.fill(0);
 
-                let obj = self.self_pager_alloc(handle, size >> 14);
+                let obj = self.object_allocate(handle, size >> 14);
 
-                todo!()
+                if let Some(_o) = obj {
+                    let mut rv = 0;
+                    if flags.intersects(MappingFlags::MAP_ANON) {
+                        todo!()
+                    } else {
+                        rv = !(flags.intersects(MappingFlags::MAP_PREFAULT_READ)) as u8 * 8 + 8;
+                    }
+
+                    todo!()
+                } else {
+                    return None;
+                }
             }
             _ => todo!(),
         }
     }
 
-    fn self_pager_alloc(&self, vfile: &Arc<VFile>, size: usize) -> () {
-        todo!()
+    fn object_allocate(&self, vfile: &Arc<VFile>, size: usize) -> Option<VmObject> {
+        Some(VmObject {})
     }
 
     fn blockpool_flush(
@@ -1026,9 +1407,9 @@ impl Vm {
         if !flags.intersects(MappingFlags::MAP_FIXED) {
             if start_addr == 0 {
                 warn!("faking start_addr in sys_mmap_dmem");
-                start_addr = 0x100000;
+                start_addr = 0x500000000;
             } else if start_addr <= 0xff0000000 {
-                todo!()
+                start_addr = 0xff0000000;
             }
             let unk1 = flags.bits() >> 24 & 0x1f;
             if unk1 > 0xd {
@@ -1041,8 +1422,7 @@ impl Vm {
 
         td.proc()
             .vm()
-            .dmem()
-            .mmap(start_addr, len, mem_type, prot, PhysAddr(start_phys_addr))
+            .mmap_dmem(start_addr, len, mem_type, prot, PhysAddr(start_phys_addr))
             .map(|x| x.into())
     }
 
@@ -1090,6 +1470,7 @@ struct Mapping {
     name: String,
     storage: Arc<dyn Storage>,
     locked: bool,
+    mem_type: Option<MemoryType>,
 }
 
 impl Mapping {
@@ -1202,6 +1583,7 @@ bitflags! {
         const MAP_GUARD = 0x00002000;
         const UNK2 = 0x00010000;
         const MAP_NOCORE = 0x00020000;
+        const MAP_PREFAULT_READ = 0x00040000;
         const UNK3 = 0x00100000;
         const MAP_SANITIZER = 0x00200000;
         const MAP_NO_COALESCE = 0x00400000;
@@ -1327,7 +1709,7 @@ impl TryFrom<i32> for BatchMapOp {
 
 #[repr(i32)]
 #[derive(Debug)]
-enum MemoryType {
+pub enum MemoryType {
     WbOnion = 0,
     WcGarlic = 3,
     WbGarlic = 10,
@@ -1339,7 +1721,7 @@ impl TryFrom<SysArg> for MemoryType {
     type Error = SysErr;
 
     fn try_from(value: SysArg) -> Result<Self, Self::Error> {
-        warn!("{:#x}", value.get());
+        // warn!("{:#x}", value.get());
         if value.get() as u32 == !(0u32) {
             Ok(MemoryType::Any)
         } else {
@@ -1366,315 +1748,111 @@ impl TryFrom<u8> for MemoryType {
 
 #[derive(Debug)]
 pub struct DmemAllocator {
-    allocations: Gutex<Vec<DmemAllocation>>,
-    mappings: Gutex<Vec<DmemMapping>>,
-    memfd: memfd::Memfd,
+    native_dmem: DmemInterface,
     size: usize,
 }
 
-// #[derive(Debug)]
-// struct HugePage {
-//     virt_addr: usize,
-//     phys_addr: usize,
-// }
-
-#[derive(Debug, PartialOrd, PartialEq, Ord, Eq, Clone, Copy)]
-pub struct PhysAddr(pub usize);
-
 #[derive(Debug)]
-struct DmemAllocation {
-    phys_addr: PhysAddr,
-    len: usize,
-}
-
-#[derive(Debug)]
-struct DmemMapping {
-    virt_addr: usize,
+struct Mapping {
+    addr: *mut u8,
     len: usize,
     prot: Protections,
-    mem_type: MemoryType,
-    phys_addr: PhysAddr,
+    name: String,
+    storage: Arc<dyn Storage>,
+    mem_type: Option<MemoryType>,
+}
+
+impl Mapping {
+    #[cfg(target_os = "linux")]
+    fn set_name(&self, addr: *mut u8, len: usize, name: &CStr) -> Result<(), Error> {
+        use libc::{prctl, PR_SET_VMA, PR_SET_VMA_ANON_NAME};
+
+        if unsafe { prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, len, name.as_ptr()) } < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_name(&self, _: *mut u8, _: usize, _: &CStr) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl DmemAllocator {
     pub fn new() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let gg = GutexGroup::new();
-        let opts = memfd::MemfdOptions::default().allow_sealing(true);
-        let mfd = opts.create("dmem")?;
-
-        mfd.as_file().set_len(0x13C_000_000)?;
-
-        // Add seals to prevent further resizing.
-        mfd.add_seals(&[memfd::FileSeal::SealShrink, memfd::FileSeal::SealGrow])?;
-
-        // Prevent further sealing changes.
-        mfd.add_seal(memfd::FileSeal::SealSeal)?;
+        let interface = DmemInterface::new(0x13C_000_000)?;
 
         Ok(Arc::new(Self {
-            allocations: gg.spawn(Vec::new()),
-            mappings: gg.spawn(Vec::new()),
-            memfd: mfd,
+            native_dmem: interface,
             size: 0x13C_000_000,
         }))
     }
 
-    pub fn allocate(
-        self: &Arc<Self>,
-        search_start: usize,
-        search_end: usize,
-        len: usize,
-        align: usize,
-    ) -> Result<PhysAddr, SysErr> {
-        let mut allocations = self.allocations.write();
+    // pub fn get_avail(
+    //     self: &Arc<Self>,
+    //     dmem_container: DmemContainer,
+    //     search_start: usize,
+    //     search_end: usize,
+    //     align: usize,
+    // ) -> Result<(PhysAddr, usize), SysErr> {
+    //     todo!();
 
-        if allocations.is_empty() {
-            let phys_addr = PhysAddr(search_start);
-            let alloc = DmemAllocation { phys_addr, len };
+    //     let mut largest_area = (PhysAddr(0), 0);
 
-            allocations.push(alloc);
+    //     let align = max(align, 0x4000);
 
-            Ok(phys_addr)
-        } else if allocations.len() == 1 {
-            info!("allocate: one allocation");
-            let allocation = allocations.last().unwrap();
+    // let allocations = self.allocations.write();
 
-            let mut candidate = search_start
-                + (search_start as *const c_void).align_offset(if align == 0 {
-                    0x4000
-                } else {
-                    align
-                });
+    // for w in allocations.windows(2) {
+    //     let i = &w[0];
+    //     let j = &w[1];
 
-            loop {
-                info!(
-                    "allocate: candidate {:#x}, len {:#x}, alloc_start {:#x}",
-                    candidate, len, allocation.phys_addr.0
-                );
+    //     info!("looking for space between {:?} and {:?}", i, j);
 
-                if candidate + len < allocation.phys_addr.0
-                    || (candidate >= (allocation.phys_addr.0 + allocation.len)
-                        && (candidate + len) < search_end)
-                {
-                    let phys_addr = PhysAddr(candidate);
-                    let alloc = DmemAllocation { phys_addr, len };
+    //     if (i.phys_addr.0 + i.len) < search_start {
+    //         continue;
+    //     }
+    //     if (i.phys_addr.0 + i.len) > search_end {
+    //         break;
+    //     }
 
-                    allocations.push(alloc);
-                    allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+    //     let candidate = (i.phys_addr.0 + i.len)
+    //         + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
 
-                    return Ok(phys_addr);
-                }
-                if candidate >= search_end {
-                    return Err(SysErr::Raw(ENOMEM));
-                }
+    //     let size = j.phys_addr.0 - candidate;
+    //     info!("candidate {:#x}, size {:#x}", candidate, size);
 
-                candidate = candidate + if align == 0 { 0x4000 } else { align };
-            }
-            // let candidate = last_allocation.phys_addr.0 + last_allocation.len;
-            // let aligned_candidate = candidate
-            //     + (candidate as *const c_void).align_offset(if align == 0 {
-            //         0x4000
-            //     } else {
-            //         align
-            //     });
+    //     if size > largest_area.1 {
+    //         largest_area = (PhysAddr(candidate), size);
+    //     }
+    // }
 
-            // if aligned_candidate + len < search_end {
-            //     let phys_addr = PhysAddr(aligned_candidate);
-            //     let alloc = DmemAllocation { phys_addr, len };
+    // let end_area = {
+    //     allocations.last().and_then(|i| {
+    //         let candidate = (i.phys_addr.0 + i.len)
+    //             + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
 
-            //     allocations.push(alloc);
+    //         info!("candidate at the end {:#x}", candidate);
 
-            //     Ok(phys_addr)
-            // } else {
-            //     warn!("allocations: {:?}", *allocations);
-            //     warn!(
-            //         "allocate: aligned_candidate={:#x}, len={:#x}, search_end={:#x}",
-            //         aligned_candidate, len, search_end
-            //     );
-            //     todo!()
-            // }
-        } else {
-            // first try at the beginning of the area
-            info!("allocate: trying at the beginning");
-            let allocation = allocations.first().unwrap();
+    //         if search_end > candidate {
+    //             Some((PhysAddr(candidate), search_end - candidate))
+    //         } else {
+    //             None
+    //         }
+    //     })
+    // };
 
-            let mut candidate = search_start
-                + (search_start as *const c_void).align_offset(if align == 0 {
-                    0x4000
-                } else {
-                    align
-                });
-
-            loop {
-                if candidate + len < allocation.phys_addr.0 {
-                    let phys_addr = PhysAddr(candidate);
-                    let alloc = DmemAllocation { phys_addr, len };
-
-                    allocations.push(alloc);
-                    allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
-
-                    return Ok(phys_addr);
-                }
-                if candidate >= allocation.phys_addr.0 {
-                    break;
-                }
-
-                candidate = candidate + if align == 0 { 0x4000 } else { align };
-            }
-
-            // now in between mappings
-            for w in allocations.windows(2) {
-                let i = &w[0];
-                let j = &w[1];
-                info!("allocate: looking for space between {:?} and {:?}", i, j);
-                let start = i.phys_addr.0 + len;
-                let candidate = start
-                    + (start as *const c_void).align_offset(if align == 0 {
-                        0x4000
-                    } else {
-                        align
-                    });
-
-                if candidate < j.phys_addr.0 && (candidate + len) < j.phys_addr.0 {
-                    let phys_addr = PhysAddr(candidate);
-                    let alloc = DmemAllocation { phys_addr, len };
-
-                    allocations.push(alloc);
-                    allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
-
-                    return Ok(phys_addr);
-                } else {
-                    continue;
-                }
-            }
-
-            // no space in between existing mappings, check after all
-            let last_allocation = allocations.last().unwrap();
-
-            let mut candidate = last_allocation.phys_addr.0
-                + (last_allocation.phys_addr.0 as *const c_void).align_offset(if align == 0 {
-                    0x4000
-                } else {
-                    align
-                });
-
-            if candidate + len < last_allocation.phys_addr.0 {
-                let phys_addr = PhysAddr(candidate);
-                let alloc = DmemAllocation { phys_addr, len };
-
-                allocations.push(alloc);
-
-                return Ok(phys_addr);
-            }
-
-            Err(SysErr::Raw(EAGAIN))
-        }
-    }
-
-    pub fn mmap(
-        self: &Arc<Self>,
-        addr: usize,
-        len: usize,
-        mem_type: MemoryType,
-        prot: Protections,
-        phys_addr: PhysAddr,
-    ) -> Result<usize, SysErr> {
-        info!("Dmem::mmap()");
-
-        /// make sure the area is allocated
-        for i in &*self.allocations.read() {
-            if phys_addr >= i.phys_addr && (phys_addr.0 + len) <= (i.phys_addr.0 + i.len) {
-                use std::os::fd::AsRawFd;
-
-                let ret = unsafe {
-                    libc::mmap(
-                        addr as *mut c_void,
-                        len,
-                        prot.into_host(),
-                        MAP_SHARED | MAP_FIXED,
-                        self.memfd.as_raw_fd(),
-                        phys_addr.0 as i64,
-                    )
-                };
-
-                let mapping = DmemMapping {
-                    virt_addr: ret as usize,
-                    len,
-                    prot,
-                    mem_type,
-                    phys_addr,
-                };
-
-                info!("Dmem::mmap(): {:?}", mapping);
-
-                self.mappings.write().push(mapping);
-
-                return Ok(ret as usize);
-            }
-        }
-
-        Err(SysErr::Raw(EAGAIN))
-    }
-
-    pub fn get_avail(
-        self: &Arc<Self>,
-        dmem_container: DmemContainer,
-        search_start: usize,
-        search_end: usize,
-        align: usize,
-    ) -> Result<(PhysAddr, usize), SysErr> {
-        let mut largest_area = (PhysAddr(0), 0);
-
-        let align = max(align, 0x4000);
-
-        let allocations = self.allocations.write();
-
-        for w in allocations.windows(2) {
-            let i = &w[0];
-            let j = &w[1];
-
-            info!("looking for space between {:?} and {:?}", i, j);
-
-            if (i.phys_addr.0 + i.len) < search_start {
-                continue;
-            }
-            if (i.phys_addr.0 + i.len) > search_end {
-                break;
-            }
-
-            let candidate = (i.phys_addr.0 + i.len)
-                + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
-
-            let size = j.phys_addr.0 - candidate;
-            info!("candidate {:#x}, size {:#x}", candidate, size);
-
-            if size > largest_area.1 {
-                largest_area = (PhysAddr(candidate), size);
-            }
-        }
-
-        let end_area = {
-            allocations.last().and_then(|i| {
-                let candidate = (i.phys_addr.0 + i.len)
-                    + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
-
-                info!("candidate at the end {:#x}", candidate);
-
-                if search_end > candidate {
-                    Some((PhysAddr(candidate), search_end - candidate))
-                } else {
-                    None
-                }
-            })
-        };
-
-        Ok(end_area
-            .and_then(|end| {
-                if end.1 > largest_area.1 {
-                    Some(end)
-                } else {
-                    Some(largest_area)
-                }
-            })
-            .unwrap_or(largest_area))
-    }
+    // Ok(end_area
+    //     .and_then(|end| {
+    //         if end.1 > largest_area.1 {
+    //             Some(end)
+    //         } else {
+    //             Some(largest_area)
+    //         }
+    //     })
+    //     .unwrap_or(largest_area))
+    // }
 }

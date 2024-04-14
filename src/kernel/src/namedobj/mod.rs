@@ -12,6 +12,10 @@ impl NamedObjManager {
         let namedobj = Arc::new(Self {});
 
         sys.register(557, &namedobj, Self::sys_namedobj_create);
+        sys.register(601, &namedobj, |_, _, _| {
+            info!("faked mdbg_service");
+            Ok(0.into())
+        });
 
         namedobj
     }
