@@ -1475,6 +1475,22 @@ impl Mapping {
     fn end(&self) -> *mut u8 {
         unsafe { self.addr.add(self.len) }
     }
+
+    #[cfg(target_os = "linux")]
+    fn set_name(&self, addr: *mut u8, len: usize, name: &CStr) -> Result<(), Error> {
+        use libc::{prctl, PR_SET_VMA, PR_SET_VMA_ANON_NAME};
+
+        if unsafe { prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, len, name.as_ptr()) } < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_name(&self, _: *mut u8, _: usize, _: &CStr) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 unsafe impl Send for Mapping {}
@@ -1748,34 +1764,6 @@ impl TryFrom<u8> for MemoryType {
 pub struct DmemAllocator {
     native_dmem: DmemInterface,
     size: usize,
-}
-
-#[derive(Debug)]
-struct Mapping {
-    addr: *mut u8,
-    len: usize,
-    prot: Protections,
-    name: String,
-    storage: Arc<dyn Storage>,
-    mem_type: Option<MemoryType>,
-}
-
-impl Mapping {
-    #[cfg(target_os = "linux")]
-    fn set_name(&self, addr: *mut u8, len: usize, name: &CStr) -> Result<(), Error> {
-        use libc::{prctl, PR_SET_VMA, PR_SET_VMA_ANON_NAME};
-
-        if unsafe { prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, len, name.as_ptr()) } < 0 {
-            Err(Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn set_name(&self, _: *mut u8, _: usize, _: &CStr) -> Result<(), Error> {
-        Ok(())
-    }
 }
 
 impl DmemAllocator {

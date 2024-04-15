@@ -31,14 +31,9 @@ impl Storage for DmemAllocation {
     ) -> Result<(), std::io::Error> {
         todo!()
     }
-    // fn set_name(
-    //     &self,
-    //     addr: *mut u8,
-    //     len: usize,
-    //     name: &std::ffi::CStr,
-    // ) -> Result<(), std::io::Error> {
-    //     todo!()
-    // }
+    fn lock(&self, addr: *mut u8, len: usize) -> Result<(), std::io::Error> {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
