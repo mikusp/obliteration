@@ -1,5 +1,6 @@
 use super::Module;
 use crate::imgact::orbis::Symbol;
+use crate::info;
 use crate::process::Binaries;
 use bitflags::bitflags;
 use std::borrow::Cow;
@@ -85,7 +86,7 @@ impl<'a> SymbolResolver<'a> {
             return Some(v);
         } else if sym.binding() == Symbol::STB_WEAK {
             // TODO: Return sym_zero.
-            todo!("resolving weak symbol");
+            info!("resolving weak symbol");
         }
 
         None

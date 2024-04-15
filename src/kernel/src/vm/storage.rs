@@ -1,4 +1,4 @@
-use super::Protections;
+use super::{Addr, Protections};
 use std::ffi::CStr;
 use std::fmt::Debug;
 use std::io::Error;
@@ -7,10 +7,11 @@ use std::io::Error;
 ///
 /// Multiple [`super::Alloc`] can share a single storage.
 pub(super) trait Storage: Debug {
-    fn addr(&self) -> *mut u8;
+    fn addr(&self) -> Addr;
+    fn ptr(&self) -> *mut u8;
     fn decommit(&self, addr: *mut u8, len: usize) -> Result<(), Error>;
     fn protect(&self, addr: *mut u8, len: usize, prot: Protections) -> Result<(), Error>;
-    fn set_name(&self, addr: *mut u8, len: usize, name: &CStr) -> Result<(), Error>;
+    fn lock(&self, addr: *mut u8, len: usize) -> Result<(), Error>;
 }
 
 /// An implementation of [`Storage`] backed by the memory.
@@ -20,12 +21,23 @@ pub(super) struct Memory {
     len: usize,
 }
 
+unsafe impl Send for Memory {}
+
 impl Memory {
     #[cfg(unix)]
     pub fn new(addr: usize, len: usize) -> Result<Self, Error> {
-        use libc::{mmap, MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE};
+        use libc::{mmap, MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_NONE};
 
-        let addr = unsafe { mmap(addr as _, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0) };
+        let addr = unsafe {
+            mmap(
+                addr as _,
+                len,
+                PROT_NONE,
+                MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+                -1,
+                0,
+            )
+        };
 
         if addr == MAP_FAILED {
             return Err(Error::last_os_error());
@@ -105,7 +117,11 @@ impl Memory {
 }
 
 impl Storage for Memory {
-    fn addr(&self) -> *mut u8 {
+    fn addr(&self) -> Addr {
+        Addr::VirtAddr(self.addr as _)
+    }
+
+    fn ptr(&self) -> *mut u8 {
         self.addr
     }
 
@@ -155,20 +171,26 @@ impl Storage for Memory {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    fn set_name(&self, addr: *mut u8, len: usize, name: &CStr) -> Result<(), Error> {
-        use libc::{prctl, PR_SET_VMA, PR_SET_VMA_ANON_NAME};
+    #[cfg(unix)]
+    fn lock(&self, addr: *mut u8, len: usize) -> Result<(), Error> {
+        use libc::mlock;
 
-        if unsafe { prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, len, name.as_ptr()) } < 0 {
+        if unsafe { mlock(addr as _, len) } < 0 {
             Err(Error::last_os_error())
         } else {
             Ok(())
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
-    fn set_name(&self, _: *mut u8, _: usize, _: &CStr) -> Result<(), Error> {
-        Ok(())
+    #[cfg(windows)]
+    fn lock(&self, addr: *mut u8, len: usize) -> Result<(), Error> {
+        use windows_sys::Win32::System::Memory::VirtualLock;
+
+        if unsafe { VirtualLock(addr as _, len) } == 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 }
 

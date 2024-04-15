@@ -49,6 +49,8 @@ impl TimeManager {
 
         info!("Getting clock time with clock_id = {clock_id:?}");
 
+        return Ok(SysOut::ZERO);
+
         unsafe {
             *ts = match clock_id {
                 ClockId::REALTIME | ClockId::REALTIME_PRECISE => todo!(),

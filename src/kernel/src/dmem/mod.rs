@@ -1,3 +1,4 @@
+use crate::budget::ProcType;
 use crate::dev::{Dmem, DmemContainer};
 use crate::errno::EINVAL;
 use crate::fs::{
@@ -8,6 +9,7 @@ use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Gid, Uid};
+use crate::vm::{MemoryType, Protections};
 use std::ops::Index;
 use std::sync::Arc;
 use thiserror::Error;
@@ -133,35 +135,56 @@ impl DmemManager {
             return Err(SysErr::Raw(EINVAL));
         }
 
-        let bp = BlockPool::new();
+        let dmem_container = *td.proc().dmem_container();
+        let unk =
+            dmem_container == DmemContainer::Zero && td.proc().budget_ptype() > ProcType::MiniApp;
 
-        let flags = VFileFlags::from_bits_retain(flags) | VFileFlags::WRITE;
+        let start = (unk as usize) << 37;
+        let end = (unk as usize) << 38 | 0x1000000000;
 
-        let fd = td.proc().files().alloc(Arc::new(VFile::new(
-            VFileType::Blockpool,
-            flags,
-            None,
-            Box::new(bp),
-        )));
+        let dev = &self[dmem_container];
 
-        info!("Opened a blockpool at fd = {fd}");
+        let addr = self.get_addr(dev, start);
+
+        //todo: manage budgets?
+
+        let blockpool = Arc::new(BlockPool {
+            dmem_container,
+            ptype: td.proc().budget_ptype(),
+            start,
+            end,
+            addr,
+        });
+
+        let mut file = VFile::new(VFileType::Blockpool, flags, None, Box::new(blockpool));
+
+        let fd = td.proc().files().alloc(Arc::new(file));
 
         Ok(fd.into())
+    }
+
+    fn get_addr(self: &Arc<Self>, dev: &DmemDevice, start: usize) -> usize {
+        if start < 0x1000000000 {
+            return start + 0x100000;
+        } else {
+            todo!();
+        }
     }
 
     fn sys_blockpool_map(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let addr: usize = i.args[0].into();
         let len: usize = i.args[1].into();
-        let mem_type: i32 = i.args[2].try_into().unwrap();
-        let protections: u32 = i.args[3].try_into().unwrap();
+        let mem_type: MemoryType = i.args[2].try_into().unwrap();
+        let protections: Protections = i.args[3].try_into().unwrap();
         let flags: i32 = i.args[4].try_into().unwrap();
 
         info!(
-            "sys_blockpool_map({}, {}, {}, {}, {})",
+            "sys_blockpool_map({:#x}, {:#x}, {:?}, {}, {})",
             addr, len, mem_type, protections, flags
         );
 
-        todo!()
+        // todo!()
+        Ok(SysOut::ZERO)
     }
 
     fn sys_blockpool_unmap(self: &Arc<Self>, _: &VThread, _i: &SysIn) -> Result<SysOut, SysErr> {

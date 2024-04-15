@@ -18,16 +18,16 @@ use tls::{Local, Tls};
 /// See [`super::VProc`] for more information.
 #[derive(Debug)]
 pub struct VThread {
-    proc: Arc<VProc>,            // td_proc
-    id: NonZeroI32,              // td_tid
-    cred: Arc<Ucred>,            // td_ucred
-    sigmask: Gutex<SignalSet>,   // td_sigmask
-    pri_class: u16,              // td_pri_class
-    base_user_pri: u16,          // td_base_user_pri
-    pcb: Gutex<Pcb>,             // td_pcb
-    cpuset: CpuSet,              // td_cpuset
-    name: Gutex<Option<String>>, // td_name
-    fpop: Gutex<Option<VFile>>,  // td_fpop
+    proc: Arc<VProc>,                // td_proc
+    id: NonZeroI32,                  // td_tid
+    cred: Arc<Ucred>,                // td_ucred
+    sigmask: Gutex<SignalSet>,       // td_sigmask
+    pri_class: u16,                  // td_pri_class
+    base_user_pri: u16,              // td_base_user_pri
+    pcb: Gutex<Pcb>,                 // td_pcb
+    cpuset: CpuSet,                  // td_cpuset
+    name: Gutex<Option<String>>,     // td_name
+    fpop: Gutex<Option<Arc<VFile>>>, // td_fpop
 }
 
 impl VThread {
@@ -94,11 +94,15 @@ impl VThread {
         &self.cpuset
     }
 
+    pub fn name(&self) -> GutexReadGuard<'_, Option<String>> {
+        self.name.read()
+    }
+
     pub fn set_name(&self, name: Option<&str>) {
         *self.name.write() = name.map(|n| n.to_owned());
     }
 
-    pub fn set_fpop(&self, file: Option<VFile>) {
+    pub fn set_fpop(&self, file: Option<Arc<VFile>>) {
         *self.fpop.write() = file
     }
 

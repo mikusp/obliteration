@@ -4,6 +4,7 @@ use crate::{
         make_dev, CharacterDevice, DeviceDriver, DriverFlags, IoCmd, MakeDevError, MakeDevFlags,
         Mode, OpenFlags,
     },
+    info,
     process::VThread,
     ucred::{Gid, Uid},
 };
@@ -38,17 +39,19 @@ impl DeviceDriver for Gc {
         _: Option<&VThread>,
     ) -> Result<(), Box<dyn Errno>> {
         match cmd {
-            IoCmd::GCGETCUMASK(_) => todo!("GCGETCUMASK ioctl"),
-            IoCmd::GCSETGSRINGSIZES(_) => todo!("GCSETGSRINGSIZES ioctl"),
-            IoCmd::GCMIPSTATSREPORT(_) => todo!("GCMIPSTATSREPORT ioctl"),
-            IoCmd::GC27(_) => todo!("GC27 ioctl"),
-            IoCmd::GCGETNUMTCAUNITS(_) => todo!("GCGETNUMTCAUNITS ioctl"),
-            IoCmd::GCDINGDONGFORWORKLOAD(_) => todo!("GCDINGDONGFORWORKLOAD ioctl"),
-            IoCmd::GCMAPCOMPUTEQUEUE(_) => todo!("GCMAPCOMPUTEQUEUE ioctl"),
-            IoCmd::GCUNMAPCOMPUTEQUEUE(_) => todo!("GCUNMAPCOMPUTEQUEUE ioctl"),
-            IoCmd::GCSETWAVELIMITMULTIPLIER(_) => todo!("GCSETWAVELIMITMULTIPLIER ioctl"),
+            IoCmd::GCGETCUMASK(_) => info!("GCGETCUMASK ioctl"),
+            IoCmd::GCSETGSRINGSIZES(_) => info!("GCSETGSRINGSIZES ioctl"),
+            IoCmd::GCMIPSTATSREPORT(_) => info!("GCMIPSTATSREPORT ioctl"),
+            IoCmd::GC27(_) => info!("GC27 ioctl"),
+            IoCmd::GCGETNUMTCAUNITS(_) => info!("GCGETNUMTCAUNITS ioctl"),
+            IoCmd::GCDINGDONGFORWORKLOAD(_) => info!("GCDINGDONGFORWORKLOAD ioctl"),
+            IoCmd::GCMAPCOMPUTEQUEUE(_) => info!("GCMAPCOMPUTEQUEUE ioctl"),
+            IoCmd::GCUNMAPCOMPUTEQUEUE(_) => info!("GCUNMAPCOMPUTEQUEUE ioctl"),
+            IoCmd::GCSETWAVELIMITMULTIPLIER(_) => info!("GCSETWAVELIMITMULTIPLIER ioctl"),
             _ => todo!(),
         }
+
+        Ok(())
     }
 }
 

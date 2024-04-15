@@ -1,8 +1,10 @@
 use crate::{
     errno::{Errno, EINVAL, EPERM},
     fs::{CharacterDevice, DeviceDriver, IoCmd},
+    info,
     process::VThread,
     syscalls::SysErr,
+    warn,
 };
 use macros::Errno;
 use std::sync::Arc;
@@ -20,6 +22,33 @@ impl Dmem {
             total_size,
             container,
         }
+    }
+
+    fn get_avail(
+        dmem: DmemContainer,
+        start: usize,
+        end: usize,
+        align: usize,
+    ) -> Result<usize, IoctlErr> {
+        if align != 0 && align - 1 & align != 0 {
+            return Err(IoctlErr::InvalidParameters);
+        }
+
+        let alignment = if align > 0x4000 { align } else { 0x4000 };
+
+        let mut start = !(start >> 63) & start;
+        if start > 0x5000000000 {
+            start = 0x5000000000;
+        }
+
+        let mut end = !(end >> 63) & end;
+        if end >= 0x5000000001 {
+            end = 0x5000000000;
+        }
+
+        warn!("{}, {:#x}", start, end);
+
+        Ok(end - start)
     }
 }
 
@@ -71,8 +100,49 @@ impl DeviceDriver for Dmem {
             // TODO: properly implement this
             IoCmd::DMEMTOTAL(size) => *size = self.total_size,
             IoCmd::DMEMGETPRT(_prt) => todo!(),
-            IoCmd::DMEMGETAVAIL(_avail) => todo!(),
-            IoCmd::DMEMALLOC(_alloc) => todo!(),
+            IoCmd::DMEMGETAVAIL(avail) => {
+                let start = avail.start_or_phys_out;
+                let dmem_container = if self.container != DmemContainer::Two {
+                    if avail.start_or_phys_out < 0x3000000000 {
+                        self.container
+                    } else if avail.start_or_phys_out > 0x301fffffff {
+                        self.container
+                    } else {
+                        DmemContainer::Two
+                    }
+                } else {
+                    DmemContainer::Two
+                };
+
+                let (phys_addr, size) = td
+                    .proc()
+                    .vm()
+                    .get_avail_dmem(dmem_container, start, avail.end, avail.align)
+                    .map_err(|_| IoctlErr::InvalidParameters)?;
+
+                info!("dmem_get_avail: addr {:#x}, size {:#x}", phys_addr.0, size);
+
+                avail.start_or_phys_out = phys_addr.0;
+                avail.size_out = size;
+            }
+            IoCmd::DMEMALLOC(alloc) => {
+                let phys_addr = td
+                    .proc()
+                    .vm()
+                    .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
+                    .map_err(|_| IoctlErr::InvalidParameters)?;
+
+                alloc.start_or_phys_out = phys_addr.0
+            }
+            IoCmd::DMEMALLOCMAIN(alloc) => {
+                let phys_addr = td
+                    .proc()
+                    .vm()
+                    .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
+                    .map_err(|_| IoctlErr::InvalidParameters)?;
+
+                alloc.start_or_phys_out = phys_addr.0
+            }
             IoCmd::DMEMQUERY(_query) => todo!(),
             _ => todo!(),
         }
@@ -86,6 +156,10 @@ enum IoctlErr {
     #[error("bad credentials")]
     #[errno(EPERM)]
     InsufficientCredentials,
+
+    #[error("bad parameters")]
+    #[errno(EINVAL)]
+    InvalidParameters,
 }
 
 #[repr(C)]

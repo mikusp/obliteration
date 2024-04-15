@@ -83,7 +83,7 @@ pub enum BudgetType {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProcType {
     BigApp = 0,
     #[allow(unused)]

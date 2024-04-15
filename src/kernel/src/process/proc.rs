@@ -8,6 +8,7 @@ use crate::errno::{Errno, EINVAL, ERANGE, ESRCH};
 use crate::fs::Vnode;
 use crate::idt::Idt;
 use crate::info;
+use crate::ipmi::IpmiObject;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::sysent::ProcAbi;
 use crate::ucred::{AuthInfo, Gid, Privilege, Ucred, Uid};
@@ -44,6 +45,7 @@ pub struct VProc {
     comm: Gutex<Option<String>>,           // p_comm
     bin: Gutex<Option<Binaries>>,          // p_dynlib?
     objects: Gutex<Idt<Arc<dyn Any + Send + Sync>>>,
+    ipmi_map: Gutex<Vec<IpmiObject>>,
     budget_id: usize,
     budget_ptype: ProcType,
     dmem_container: Gutex<DmemContainer>,
@@ -84,6 +86,7 @@ impl VProc {
             files: FileDesc::new(root),
             system_path: system_path.into(),
             objects: gg.spawn(Idt::new(0x1000)),
+            ipmi_map: gg.spawn(vec![]),
             budget_id,
             budget_ptype,
             dmem_container: gg.spawn(dmem_container),
@@ -152,6 +155,10 @@ impl VProc {
         &self.limits[ty]
     }
 
+    pub fn name(&self) -> GutexReadGuard<Option<String>> {
+        self.comm.read()
+    }
+
     pub fn set_name(&self, name: Option<&str>) {
         *self.comm.write() = name.map(|n| n.to_owned());
     }
@@ -162,6 +169,10 @@ impl VProc {
 
     pub fn bin_mut(&self) -> GutexWriteGuard<Option<Binaries>> {
         self.bin.write()
+    }
+
+    pub fn objects(&self) -> GutexReadGuard<'_, Idt<Arc<dyn Any + Send + Sync>>> {
+        self.objects.read()
     }
 
     pub fn objects_mut(&self) -> GutexWriteGuard<'_, Idt<Arc<dyn Any + Send + Sync>>> {
@@ -184,6 +195,10 @@ impl VProc {
         self.dmem_container.write()
     }
 
+    pub fn ipmi_map_mut(&self) -> GutexWriteGuard<'_, Vec<IpmiObject>> {
+        self.ipmi_map.write()
+    }
+
     pub fn app_info(&self) -> &AppInfo {
         &self.app_info
     }
@@ -194,6 +209,10 @@ impl VProc {
 
     pub fn uptc(&self) -> &AtomicPtr<u8> {
         &self.uptc
+    }
+
+    pub fn sdk_ver(&self) -> Option<u32> {
+        (&self.bin().as_ref().map(|bin| bin.app().sdk_ver())).clone()
     }
 
     fn sys_thr_new(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
