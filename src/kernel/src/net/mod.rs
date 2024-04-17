@@ -275,7 +275,7 @@ impl NetManager {
                     ty,
                     VFileFlags::READ | VFileFlags::WRITE,
                     None,
-                    todo!(),
+                    Box::new(SocketFileBackend(so)),
                 ))
             },
             budget,

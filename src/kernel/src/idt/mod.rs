@@ -7,7 +7,7 @@ mod entry;
 /// An implementation of `sys/kern/orbis_idt.c`.
 #[derive(Debug)]
 pub struct Idt<T> {
-    sets: Vec<[Option<Entry<T>>; 0x80]>,
+    sets: Vec<[Option<Entry<T>>; 0x200]>,
     next: usize,
     limit: usize,
 }
@@ -20,7 +20,7 @@ impl<T> Idt<T> {
         assert_ne!(limit, 0);
 
         // Allocate the first set.
-        let sets = vec![[Self::NONE; 0x80]];
+        let sets = vec![[Self::NONE; 0x200]];
 
         Self {
             sets,
@@ -44,7 +44,7 @@ impl<T> Idt<T> {
     {
         // Allocate a new set if necessary.
         let id = self.next;
-        let set = id / 0x80;
+        let set = id / 0x200;
 
         while set >= self.sets.len() {
             todo!("id_alloc with entries span across the first set");
@@ -52,7 +52,7 @@ impl<T> Idt<T> {
 
         // Get the entry.
         let set = &mut self.sets[set];
-        let entry = &mut set[id % 0x80];
+        let entry = &mut set[id % 0x200];
 
         assert!(entry.is_none());
 
@@ -72,8 +72,8 @@ impl<T> Idt<T> {
         }
 
         let i = id & 0x1fff;
-        let set = self.sets.get(i / 0x80);
-        let entry = set.and_then(|s| s[i % 0x80].as_ref());
+        let set = self.sets.get(i / 0x200);
+        let entry = set.and_then(|s| s[i % 0x200].as_ref());
 
         if entry.map(|x| x.ty()) != ty {
             return None;
@@ -89,8 +89,8 @@ impl<T> Idt<T> {
         }
 
         let i = id & 0x1fff;
-        let set = self.sets.get_mut(i / 0x80)?;
-        let entry = set[i % 0x80].as_mut()?;
+        let set = self.sets.get_mut(i / 0x200)?;
+        let entry = set[i % 0x200].as_mut()?;
 
         if let Some(ty) = ty {
             if entry.ty() != ty {
@@ -99,5 +99,21 @@ impl<T> Idt<T> {
         }
 
         Some(entry)
+    }
+
+    pub fn delete(&mut self, id: usize, ty: Option<u16>) -> Option<()> {
+        let i = id & 0x1fff;
+        let set = self.sets.get_mut(i / 0x200);
+        let entry = set.and_then(|x| {
+            let old = x[i % 0x200].as_ref();
+            if old.map(|x| x.ty()) == ty {
+                x[i % 0x200] = None;
+                Some(())
+            } else {
+                None
+            }
+        });
+
+        entry
     }
 }

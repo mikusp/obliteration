@@ -1,5 +1,6 @@
 use super::dirent::Dirent;
 use crate::errno::{Errno, ENODEV, ENOTTY};
+use crate::error;
 use crate::fs::{
     FileBackend, IoCmd, IoLen, IoVec, IoVecMut, Mode, OpenFlags, PollEvents, Stat, TruncateLength,
     VFile,
@@ -111,7 +112,7 @@ impl CharacterDevice {
 
 /// Implementation of `devfs_ops_f`.
 #[derive(Debug)]
-pub(super) struct CdevFileBackend(Arc<CharacterDevice>);
+pub struct CdevFileBackend(pub Arc<CharacterDevice>);
 
 impl CdevFileBackend {
     pub fn new(dev: Arc<CharacterDevice>) -> Self {
@@ -120,6 +121,9 @@ impl CdevFileBackend {
 }
 
 impl FileBackend for CdevFileBackend {
+    fn name(&self) -> Option<String> {
+        Some(self.0.clone().name.clone())
+    }
     fn is_seekable(&self) -> bool {
         true
     }
@@ -141,7 +145,8 @@ impl FileBackend for CdevFileBackend {
         buf: &[IoVec],
         td: Option<&VThread>,
     ) -> Result<IoLen, Box<dyn Errno>> {
-        todo!()
+        error!("cdev write");
+        return Ok(buf.first().unwrap().len());
     }
 
     fn ioctl(&self, file: &VFile, cmd: IoCmd, td: Option<&VThread>) -> Result<(), Box<dyn Errno>> {

@@ -51,9 +51,10 @@ impl EvfManager {
         let init_pattern: u64 = i.args[2].into();
 
         let mut objects = td.proc().objects_mut();
+        let ev = Arc::new(EventFlag::new(attr, init_pattern));
         let id = objects.alloc(Entry::new(
             Some(name.into()),
-            Arc::new(EventFlag::new(attr, init_pattern)),
+            ev.clone(),
             EventFlag::ENTRY_TYPE,
         ));
 
@@ -64,7 +65,8 @@ impl EvfManager {
 
         if attr.intersects(EventFlagAttr::EVF_SHARED) {
             // implement gnt (global name table?)
-            error!("creating a shared event flag");
+            warn!("creating a shared event flag");
+            td.proc().gnt_mut().insert(name.to_owned(), ev.clone());
         }
 
         Ok(id.into())
@@ -80,7 +82,32 @@ impl EvfManager {
             return Ok(0.into());
         }
 
-        todo!()
+        let gnt = td.proc().gnt_mut();
+        let existing = gnt.get(flag_name.into());
+        match existing {
+            None => Err(SysErr::Raw(ESRCH)),
+            Some(entry) => {
+                // todo!();
+                let flag: &Arc<EventFlag> = &entry
+                    .clone()
+                    .downcast()
+                    .expect("wrong type of named object");
+                let mut objects = td.proc().objects_mut();
+                let id = objects.alloc(Entry::new(
+                    Some(flag_name.into()),
+                    flag.clone(),
+                    EventFlag::ENTRY_TYPE,
+                ));
+
+                // fd_entry.set_ty(EventFlag::ENTRY_TYPE);
+                // fd_entry.set_name(Some(flag_name.into()));
+                // fd_entry.set_data(flag.clone());
+                drop(objects);
+
+                Ok(id.into())
+            }
+        }
+        // todo!()
     }
 
     fn sys_evf_close(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {

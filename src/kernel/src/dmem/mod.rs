@@ -131,6 +131,8 @@ impl DmemManager {
     fn sys_blockpool_open(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let flags: u32 = i.args[0].try_into().unwrap();
 
+        info!("sys_blockpool_open({:#x})", flags);
+
         if flags & 0xffafffff != 0 {
             return Err(SysErr::Raw(EINVAL));
         }
@@ -148,15 +150,20 @@ impl DmemManager {
 
         //todo: manage budgets?
 
-        let blockpool = Arc::new(BlockPool {
+        let blockpool = BlockPool {
             dmem_container,
             ptype: td.proc().budget_ptype(),
             start,
             end,
             addr,
-        });
+        };
 
-        let mut file = VFile::new(VFileType::Blockpool, flags, None, Box::new(blockpool));
+        let file = VFile::new(
+            VFileType::Blockpool,
+            VFileFlags::from_bits_retain(flags | 2),
+            None,
+            Box::new(blockpool),
+        );
 
         let fd = td.proc().files().alloc(Arc::new(file));
 

@@ -382,7 +382,17 @@ impl Fs {
 
         info!("Writing {len} bytes to fd {fd}.");
 
-        todo!()
+        let file = td.proc().files().get_for_write(fd)?;
+        let offset = file.offset_mut();
+
+        let mut iovec = unsafe { IoVec::new(ptr, IoLen::from_usize(len)?) };
+        let slice = std::slice::from_mut(&mut iovec);
+
+        let written = file
+            .backend()
+            .write(file.as_ref(), *offset, slice, Some(td))?;
+
+        Ok(written.into())
     }
 
     fn sys_open(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -409,9 +419,9 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_TRUNC) {
             todo!("open({path}) with flags & O_TRUNC");
         } else {
-            let mode: u32 = i.args[2].try_into().unwrap();
+            let mode: i64 = i.args[2].try_into().unwrap();
             if mode != 0 {
-                todo!("open({path}, {flags}) with mode = {mode}");
+                todo!("open({path}, {flags}) with mode = {mode:#x}");
             }
         }
 

@@ -300,6 +300,12 @@ impl VnodeFileBackend {
 }
 
 impl FileBackend for VnodeFileBackend {
+    fn name(&self) -> Option<String> {
+        self.0.item.read().clone().and_then(|x| match x {
+            VnodeItem::Device(d) => Some(d.name().to_string()),
+            VnodeItem::Mount(m) => None,
+        })
+    }
     fn is_seekable(&self) -> bool {
         true
     }

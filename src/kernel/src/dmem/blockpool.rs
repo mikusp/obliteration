@@ -4,12 +4,9 @@ use crate::errno::{Errno, EINVAL, ENOMEM};
 use crate::fs::{DefaultFileBackendError, FileBackend, IoCmd, PollEvents, Stat, VFile};
 use crate::info;
 use crate::process::VThread;
-<<<<<<< HEAD
-=======
 use crate::syscalls::SysErr;
 use crate::vm::PhysAddr;
 use std::sync::Arc;
->>>>>>> 72cc98e (sys_mlock and sys_mprotect)
 
 #[derive(Debug)]
 pub struct BlockPool {
@@ -26,7 +23,7 @@ impl BlockPool {
     // }
 
     fn expand(
-        self: &Arc<Self>,
+        &self,
         len: i64,
         search_start: usize,
         search_end: usize,

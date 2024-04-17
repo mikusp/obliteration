@@ -10,6 +10,7 @@ use crate::dev::DmemContainer;
 use crate::errno::EAGAIN;
 use crate::errno::{Errno, EINVAL, ENOMEM, EOPNOTSUPP};
 use crate::error;
+use crate::fs::CdevFileBackend;
 use crate::fs::VFile;
 use crate::fs::VFileType;
 use crate::process::GetFileError;
@@ -121,6 +122,7 @@ impl Vm {
         sys.register(203, &mm, Self::sys_mlock);
         sys.register(477, &mm, Self::sys_mmap);
         sys.register(548, &mm, Self::sys_batch_map);
+        sys.register(572, &mm, Self::sys_virtual_query);
         sys.register(588, &mm, Self::sys_mname);
         sys.register(628, &mm, Self::sys_mmap_dmem);
 
@@ -775,8 +777,8 @@ impl Vm {
         };
 
         if let Some(ref vfile) = file_handle {
-            match &vfile.ty {
-                VFileType::Blockpool(bp) => {
+            match &vfile.ty() {
+                VFileType::Blockpool => {
                     if file_offset != 0 {
                         return Err(MmapError::InvalidOffset);
                     }
@@ -805,19 +807,27 @@ impl Vm {
 
                     // todo!()
                 }
-                VFileType::Device(cdev) => {
-                    if cdev.name() == "gc" {
+                VFileType::Device => {
+                    let b = vfile.backend();
+                    if b.name() == Some("gc".to_string()) {
                         // nothing for now
-                    } else if cdev.name() == "dmem1" {
+                    } else if b.name() == Some("dmem1".to_string()) {
                         // nothing
                     } else {
-                        todo!("{}", cdev.name())
+                        todo!("{:?}", b.name())
                     }
                 }
-                _ => {
-                    error!("unhandled {:?}", &vfile.ty);
-                    todo!()
+                VFileType::Vnode => {
+                    let b = vfile.backend();
+                    if b.name() == Some("gc".to_string()) {
+                        // nothing for now
+                    } else if b.name() == Some("dmem1".to_string()) {
+                        // nothing
+                    } else {
+                        todo!("{:?}", b.name())
+                    }
                 }
+                _ => todo!(),
             }
         }
 
@@ -1028,8 +1038,8 @@ impl Vm {
 
         let td = &VThread::current();
 
-        match &handle.ty {
-            VFileType::Blockpool(bp) => {
+        match &handle.ty() {
+            VFileType::Blockpool => {
                 let mut sdk_ver = None;
                 if td.is_none()
                     || td
@@ -1327,6 +1337,11 @@ impl Vm {
         }
 
         result.map(|_| SysOut::ZERO)
+    }
+
+    fn sys_virtual_query(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        info!("sys_virtual_query");
+        Ok(SysOut::ZERO)
     }
 
     fn sys_mname(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {

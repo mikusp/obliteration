@@ -457,7 +457,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn budgets_mlock_total(
@@ -467,7 +467,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn machdep_tsc_freq(

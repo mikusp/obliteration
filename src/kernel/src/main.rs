@@ -2,7 +2,7 @@ use crate::arch::MachDep;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::dev::{
     CameraManager, DebugManager, DebugManagerInitError, DipswInitError, DipswManager,
-    DmemContainer, GcManager, RngManager, TtyManager, TtyManagerInitError,
+    DmemContainer, GcManager, RngManager, SblSrvManager, TtyManager, TtyManagerInitError,
 };
 use crate::dmem::{DmemManager, DmemManagerInitError};
 use crate::ee::native::NativeEngine;
@@ -28,7 +28,7 @@ use crate::time::TimeManager;
 use crate::ucred::{AuthAttrs, AuthCaps, AuthInfo, AuthPaid, Gid, Ucred, Uid};
 use crate::umtx::UmtxManager;
 use clap::Parser;
-use dev::{CameraInitError, GcInitError, RngInitError};
+use dev::{CameraInitError, GcInitError, RngInitError, SblSrvInitError};
 use llt::{OsThread, SpawnError};
 use macros::vpath;
 use param::Param;
@@ -359,6 +359,8 @@ fn run() -> Result<(), KernelError> {
     let camera = CameraManager::new()?;
     #[allow(unused_variables)] // TODO: Remove this when someone uses rng.
     let rng = RngManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses sbl_srv.
+    let sbl_srv = SblSrvManager::new()?;
 
     // Initialize kernel components.
     #[allow(unused_variables)] // TODO: Remove this when someone uses debug.
@@ -632,6 +634,9 @@ enum KernelError {
 
     #[error("rng manager initialization failed")]
     RngManagerInitFailed(#[from] RngInitError),
+
+    #[error("sbl_srv manager initialization failed")]
+    SblSrvManagerInitFailed(#[from] SblSrvInitError),
 
     #[error("dmem manager initialization failed")]
     DmemManagerInitFailed(#[from] DmemManagerInitError),

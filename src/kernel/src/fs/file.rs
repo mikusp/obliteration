@@ -3,7 +3,7 @@ use crate::errno::{Errno, EINVAL, ENOTTY, ENXIO, EOPNOTSUPP};
 use crate::fs::{IoVec, PollEvents};
 use crate::process::VThread;
 use bitflags::bitflags;
-use gmtx::{Gutex, GutexGroup};
+use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
 use macros::Errno;
 use std::fmt::Debug;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
@@ -44,6 +44,14 @@ impl VFile {
 
     pub fn flags(&self) -> VFileFlags {
         self.flags
+    }
+
+    pub fn offset_mut(&self) -> GutexWriteGuard<'_, u64> {
+        self.offset.write()
+    }
+
+    pub fn backend(&self) -> &Box<dyn FileBackend> {
+        &self.backend
     }
 
     pub fn is_seekable(&self) -> bool {
@@ -146,6 +154,9 @@ bitflags! {
 
 /// An implementation of `fileops` structure.
 pub trait FileBackend: Debug + Send + Sync + 'static {
+    fn name(&self) -> Option<String> {
+        None
+    }
     /// Implementation of `fo_flags` with `DFLAG_SEEKABLE`.
     fn is_seekable(&self) -> bool;
 

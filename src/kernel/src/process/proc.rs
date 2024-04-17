@@ -17,6 +17,7 @@ use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
 use macros::Errno;
 use std::any::Any;
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::zeroed;
 use std::num::NonZeroI32;
@@ -45,6 +46,7 @@ pub struct VProc {
     comm: Gutex<Option<String>>,           // p_comm
     bin: Gutex<Option<Binaries>>,          // p_dynlib?
     objects: Gutex<Idt<Arc<dyn Any + Send + Sync>>>,
+    gnt: Gutex<HashMap<String, Arc<dyn Any + Send + Sync>>>,
     ipmi_map: Gutex<Vec<IpmiObject>>,
     budget_id: usize,
     budget_ptype: ProcType,
@@ -86,6 +88,7 @@ impl VProc {
             files: FileDesc::new(root),
             system_path: system_path.into(),
             objects: gg.spawn(Idt::new(0x1000)),
+            gnt: gg.spawn(HashMap::new()),
             ipmi_map: gg.spawn(vec![]),
             budget_id,
             budget_ptype,
@@ -193,6 +196,10 @@ impl VProc {
 
     pub fn dmem_container_mut(&self) -> GutexWriteGuard<'_, DmemContainer> {
         self.dmem_container.write()
+    }
+
+    pub fn gnt_mut(&self) -> GutexWriteGuard<'_, HashMap<String, Arc<dyn Any + Send + Sync>>> {
+        self.gnt.write()
     }
 
     pub fn ipmi_map_mut(&self) -> GutexWriteGuard<'_, Vec<IpmiObject>> {

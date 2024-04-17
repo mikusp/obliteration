@@ -5,6 +5,7 @@ use crate::fs::{
     DefaultFileBackendError, FileBackend, IoCmd, IoLen, IoVec, IoVecMut, PollEvents, Stat,
     TruncateLength, VFile,
 };
+use crate::info;
 use crate::process::VThread;
 use crate::ucred::Ucred;
 use macros::Errno;
@@ -94,7 +95,10 @@ impl Socket {
     }
 }
 
-impl FileBackend for Socket {
+#[derive(Debug)]
+pub struct SocketFileBackend(pub Arc<Socket>);
+
+impl FileBackend for SocketFileBackend {
     fn is_seekable(&self) -> bool {
         todo!()
     }
@@ -136,7 +140,7 @@ impl FileBackend for Socket {
             IoCmd::SIOCSPGRP(_) => todo!("socket ioctl with SIOCSPGRP"),
             IoCmd::SIOCGPGRP(_) => todo!("socket ioctl with SIOCGPGRP"),
             IoCmd::SIOCATMARK(_) => todo!("socket ioctl with SIOCATMARK"),
-            _ => self.backend.control(todo!(), cmd, td),
+            _ => self.0.backend.control(&self.0, cmd, td),
         }
     }
 
