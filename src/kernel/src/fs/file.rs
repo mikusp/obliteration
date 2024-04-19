@@ -5,6 +5,7 @@ use crate::process::VThread;
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
 use macros::Errno;
+use std::any::Any;
 use std::fmt::Debug;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -153,7 +154,7 @@ bitflags! {
 }
 
 /// An implementation of `fileops` structure.
-pub trait FileBackend: Debug + Send + Sync + 'static {
+pub trait FileBackend: Any + Debug + Send + Sync + 'static {
     fn name(&self) -> Option<String> {
         None
     }

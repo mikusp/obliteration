@@ -51,7 +51,7 @@ impl EvfManager {
         let init_pattern: u64 = i.args[2].into();
 
         let mut objects = td.proc().objects_mut();
-        let ev = Arc::new(EventFlag::new(attr, init_pattern));
+        let ev = EventFlag::new(attr, init_pattern);
         let id = objects.alloc(Entry::new(
             Some(name.into()),
             ev.clone(),
@@ -62,6 +62,18 @@ impl EvfManager {
             "{}=sys_evf_create({}, {:#x}, {:#x})",
             id, name, attr, init_pattern
         );
+
+        {
+            let entry = objects
+                .get(id, Some(EventFlag::ENTRY_TYPE))
+                .ok_or(SysErr::Raw(ESRCH))?;
+            info!("entry type {:#x}", entry.ty());
+            let flag: Arc<EventFlag> = entry
+                .data()
+                .clone()
+                .downcast()
+                .expect("wrong type of named object after creating");
+        }
 
         if attr.intersects(EventFlagAttr::EVF_SHARED) {
             // implement gnt (global name table?)
@@ -217,7 +229,7 @@ impl EvfManager {
         let entry = objects
             .get(evf, Some(EventFlag::ENTRY_TYPE))
             .ok_or(SysErr::Raw(ESRCH))?;
-        let flag: &Arc<EventFlag> = &entry
+        let flag: Arc<EventFlag> = entry
             .data()
             .clone()
             .downcast()

@@ -1,13 +1,19 @@
-use crate::errno::{Errno, EINVAL};
+use crate::errno::{self, Errno, EINVAL, EMFILE, ENOENT};
 use crate::fs::{
     check_access, Access, AccessError, DefaultFileBackendError, FileBackend, IoCmd, IoLen, IoVec,
-    IoVecMut, Mode, OpenFlags, PollEvents, Stat, TruncateLength, VFile, VFileFlags, VPathBuf,
+    IoVecMut, Mode, OpenFlags, PollEvents, Stat, TruncateLength, VFile, VFileFlags, VFileType,
+    VPathBuf,
 };
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Gid, Ucred, Uid};
+use crate::vm::{MappingFlags, MmapError, Protections};
+use crate::{error, info};
+use bitflags::Flags;
 use macros::Errno;
+use std::any::Any;
 use std::convert::Infallible;
+use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -28,32 +34,66 @@ impl SharedMemoryManager {
         let flags: OpenFlags = i.args[1].try_into().unwrap();
         let mode: u32 = i.args[2].try_into().unwrap();
 
-        if (flags & OpenFlags::O_ACCMODE != OpenFlags::O_RDONLY)
-            || (flags & OpenFlags::O_ACCMODE != OpenFlags::O_RDWR)
-        {
+        info!("sys_shm_open({:?}, {}, {})", path, flags, mode);
+
+        if (flags & OpenFlags::O_ACCMODE).union(OpenFlags::O_RDWR) != OpenFlags::O_RDWR {
             return Err(SysErr::Raw(EINVAL));
         }
 
-        if !flags
-            .difference(
-                OpenFlags::O_ACCMODE | OpenFlags::O_CREAT | OpenFlags::O_EXCL | OpenFlags::O_TRUNC,
-            )
-            .is_empty()
-        {
+        if flags.bits() & 0xffdff1fc != 0 {
             return Err(SysErr::Raw(EINVAL));
         }
 
         let filedesc = td.proc().files();
 
         #[allow(unused_variables)] // TODO: remove when implementing.
-        let mode = mode & filedesc.cmask() & 0o7777;
+        let mode = mode & filedesc.cmask() & 0o777;
 
-        let fd = filedesc.alloc_without_budget::<Infallible>(|_| match path {
+        let fd = filedesc.alloc_without_budget::<ShmError>(|_| match path {
             ShmPath::Anon => {
                 todo!()
             }
-            ShmPath::Path(_) => {
-                todo!()
+            ShmPath::Path(ref vpath) => {
+                if !vpath.starts_with('/') {
+                    return Err(ShmError::InvalidPath);
+                }
+
+                if td.cred().is_webcore_process() && !vpath.starts_with("/SceWebCore/") {
+                    return Err(ShmError::InvalidShmForWebProcess(vpath.clone()));
+                }
+
+                // TODO: find shm in hashtable
+
+                if flags.intersects(OpenFlags::O_CREAT) {
+                    let file_flags = if flags.intersects(OpenFlags::O_RDWR) {
+                        VFileFlags::READ | VFileFlags::WRITE
+                    } else if flags.intersects(OpenFlags::O_WRONLY) {
+                        VFileFlags::WRITE
+                    } else {
+                        VFileFlags::READ
+                    };
+
+                    let shm_fd = memfd::MemfdOptions::default()
+                        .create(vpath.to_string())
+                        .map_err(|_| ShmError::CreateFailed)?;
+
+                    let shm = SharedMemory {
+                        path,
+                        uid: td.cred().effective_uid(),
+                        gid: *td.cred().groups().first().unwrap(),
+                        mode: Mode::new(mode as u16).unwrap(),
+                        shm_fd,
+                    };
+
+                    Ok(VFile::new(
+                        VFileType::SharedMemory,
+                        file_flags,
+                        None,
+                        Box::new(shm),
+                    ))
+                } else {
+                    Err(ShmError::NotFound(vpath.clone()))
+                }
             }
         })?;
 
@@ -64,8 +104,35 @@ impl SharedMemoryManager {
     fn sys_shm_unlink(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         todo!("sys_shm_unlink")
     }
+
+    pub fn mmap(file: Arc<VFile>, len: usize, offset: i64) -> Result<usize, MmapError> {
+        let backend = file.backend().as_ref() as &dyn Any;
+        let shmfd: &SharedMemory = (backend as &dyn Any)
+            .downcast_ref()
+            .expect("shm handle is not shm");
+
+        use std::os::fd::AsRawFd;
+
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                shmfd.shm_fd.as_raw_fd(),
+                offset,
+            )
+        };
+
+        if addr == libc::MAP_FAILED {
+            Err(MmapError::NoMem(len))
+        } else {
+            Ok(addr as usize)
+        }
+    }
 }
 
+#[derive(Debug)]
 pub enum ShmPath {
     Anon,
     Path(VPathBuf),
@@ -75,16 +142,26 @@ pub enum ShmPath {
 #[derive(Debug)]
 #[allow(unused_variables)] // TODO: remove when used.
 pub struct SharedMemory {
+    path: ShmPath,
     uid: Uid,
     gid: Gid,
     mode: Mode,
+    shm_fd: memfd::Memfd,
 }
 
 impl SharedMemory {
     /// See `shm_do_truncate` on the PS4 for a reference.
     #[allow(unused_variables)] // TODO: remove when implementing.
     fn do_truncate(&self, length: TruncateLength) -> Result<(), TruncateError> {
-        todo!()
+        info!("shm_do_truncate({:?}, {:#x})", self.path, length.0);
+
+        use std::os::fd::AsRawFd;
+
+        if unsafe { libc::ftruncate(self.shm_fd.as_raw_fd(), length.0) } < 0 {
+            Err(TruncateError::TruncateError)
+        } else {
+            Ok(())
+        }
     }
 
     /// See `shm_access` on the PS4 for a reference.
@@ -163,4 +240,27 @@ impl FileBackend for SharedMemory {
 }
 
 #[derive(Debug, Error, Errno)]
-pub enum TruncateError {}
+pub enum TruncateError {
+    #[error("truncate error")]
+    #[errno(EINVAL)]
+    TruncateError,
+}
+
+#[derive(Debug, Error, Errno)]
+pub enum ShmError {
+    #[error("path doesn't start with /")]
+    #[errno(EINVAL)]
+    InvalidPath,
+
+    #[error("webcore process cannot open shm {0}")]
+    #[errno(ENOENT)]
+    InvalidShmForWebProcess(VPathBuf),
+
+    #[error("shm not found {0}")]
+    #[errno(ENOENT)]
+    NotFound(VPathBuf),
+
+    #[error("creating memfd failed")]
+    #[errno(EMFILE)]
+    CreateFailed,
+}

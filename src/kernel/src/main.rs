@@ -1,3 +1,4 @@
+#![feature(trait_upcasting)]
 use crate::arch::MachDep;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::dev::{

@@ -8,6 +8,7 @@ use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup};
 use macros::{vpath, Errno};
 use std::borrow::Cow;
+use std::ffi::CStr;
 use std::fmt::{Display, Formatter};
 use std::num::TryFromIntError;
 use std::path::PathBuf;
@@ -380,13 +381,15 @@ impl Fs {
         let ptr: *const u8 = i.args[1].into();
         let len: usize = i.args[2].into();
 
-        info!("Writing {len} bytes to fd {fd}.");
+        // info!("Writing {len} bytes to fd {fd}.");
 
         let file = td.proc().files().get_for_write(fd)?;
         let offset = file.offset_mut();
 
         let mut iovec = unsafe { IoVec::new(ptr, IoLen::from_usize(len)?) };
         let slice = std::slice::from_mut(&mut iovec);
+
+        // info!("{}", unsafe { CStr::from_ptr(ptr as _) }.to_string_lossy());
 
         let written = file
             .backend()
@@ -958,6 +961,7 @@ bitflags! {
         const O_EXCL = 0x00000800;
         const O_EXEC = 0x00040000;
         const O_CLOEXEC = 0x00100000;
+        const UNK2 = 0x00200000;
         const UNK1 = 0x00400000;
     }
 }
@@ -1062,7 +1066,7 @@ bitflags! {
     }
 }
 
-pub struct TruncateLength(i64);
+pub struct TruncateLength(pub i64);
 
 impl TryFrom<i64> for TruncateLength {
     type Error = TruncateLengthError;

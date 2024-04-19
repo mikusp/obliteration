@@ -1,5 +1,7 @@
 use std::ptr;
 
+use crate::warn;
+
 use super::storage::Storage;
 use super::Addr;
 use super::Protections;
@@ -7,10 +9,16 @@ use super::Protections;
 #[derive(Debug, PartialOrd, PartialEq, Ord, Eq, Clone, Copy)]
 pub struct PhysAddr(pub usize);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Eq)]
 pub(super) struct DmemAllocation {
     pub phys_addr: PhysAddr,
     pub len: usize,
+}
+
+impl Ord for DmemAllocation {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.phys_addr.0.cmp(&other.phys_addr.0)
+    }
 }
 
 impl Storage for DmemAllocation {
@@ -29,7 +37,9 @@ impl Storage for DmemAllocation {
         len: usize,
         prot: super::Protections,
     ) -> Result<(), std::io::Error> {
-        todo!()
+        warn!("Dmem::protect({:#x}, {:#x}, {})", addr as usize, len, prot);
+
+        Ok(())
     }
     fn lock(&self, addr: *mut u8, len: usize) -> Result<(), std::io::Error> {
         todo!()

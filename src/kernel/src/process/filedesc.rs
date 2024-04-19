@@ -1,13 +1,16 @@
 use crate::budget::BudgetType;
 use crate::errno::{Errno, EBADF, ENOTSOCK};
-use crate::fs::{VFile, VFileFlags, VFileType, Vnode};
+use crate::error;
+use crate::fs::{FileBackend, IoLen, VFile, VFileFlags, VFileType, Vnode};
 use crate::kqueue::KernelQueue;
 use crate::net::Socket;
 use gmtx::{Gutex, GutexGroup};
 use macros::Errno;
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::ffi::CStr;
 use std::num::{NonZeroI32, TryFromIntError};
+use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -21,13 +24,90 @@ pub struct FileDesc {
     cmask: u32,                            // fd_cmask
 }
 
+#[derive(Debug)]
+struct StdTty {}
+
+impl FileBackend for StdTty {
+    fn write(
+        &self,
+        file: &VFile,
+        off: u64,
+        buf: &[crate::fs::IoVec],
+        td: Option<&super::VThread>,
+    ) -> Result<crate::fs::IoLen, Box<dyn Errno>> {
+        let mut len = 0;
+        let mut string = "".to_string();
+        for iovec in buf {
+            string = string + &String::from_utf8_lossy(iovec.deref());
+            len = len + iovec.len().get();
+        }
+        eprint!("{}", string);
+
+        Ok(IoLen::from_usize(len)?)
+    }
+    fn ioctl(
+        &self,
+        file: &VFile,
+        cmd: crate::fs::IoCmd,
+        td: Option<&super::VThread>,
+    ) -> Result<(), Box<dyn Errno>> {
+        todo!()
+    }
+    fn is_seekable(&self) -> bool {
+        false
+    }
+    fn name(&self) -> Option<String> {
+        todo!()
+    }
+    fn poll(
+        &self,
+        file: &VFile,
+        events: crate::fs::PollEvents,
+        td: &super::VThread,
+    ) -> crate::fs::PollEvents {
+        todo!()
+    }
+    fn read(
+        &self,
+        file: &VFile,
+        off: u64,
+        buf: &mut [crate::fs::IoVecMut],
+        td: Option<&super::VThread>,
+    ) -> Result<crate::fs::IoLen, Box<dyn Errno>> {
+        todo!()
+    }
+    fn stat(
+        &self,
+        file: &VFile,
+        td: Option<&super::VThread>,
+    ) -> Result<crate::fs::Stat, Box<dyn Errno>> {
+        todo!()
+    }
+    fn truncate(
+        &self,
+        file: &VFile,
+        length: crate::fs::TruncateLength,
+        td: Option<&super::VThread>,
+    ) -> Result<(), Box<dyn Errno>> {
+        todo!()
+    }
+}
+
 impl FileDesc {
     pub(super) fn new(root: Arc<Vnode>) -> Arc<Self> {
         let gg = GutexGroup::new();
 
+        let stderr = VFile::new(
+            VFileType::Vnode,
+            VFileFlags::WRITE,
+            None,
+            Box::new(StdTty {}),
+        );
+
         let filedesc = Self {
             // TODO: the first 3 file descriptors should probably be ttyconsdev
-            files: gg.spawn(vec![]),
+            // set stdin, stdout, stderr !!!!!!
+            files: gg.spawn(vec![None, None, Some(Arc::new(stderr))]),
             cwd: gg.spawn(root.clone()),
             root: gg.spawn(root),
             kqueue_list: gg.spawn(VecDeque::new()),

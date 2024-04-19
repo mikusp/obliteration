@@ -7,14 +7,20 @@ use self::iter::StartFromMut;
 use self::storage::Memory;
 use self::storage::Storage;
 use crate::dev::DmemContainer;
+use crate::dev::DmemIoctlErr;
+use crate::dev::DmemQueryInfo;
+use crate::errno::EACCES;
 use crate::errno::EAGAIN;
 use crate::errno::{Errno, EINVAL, ENOMEM, EOPNOTSUPP};
 use crate::error;
 use crate::fs::CdevFileBackend;
 use crate::fs::VFile;
+use crate::fs::VFileFlags;
 use crate::fs::VFileType;
 use crate::process::GetFileError;
 use crate::process::VThread;
+use crate::shm::SharedMemory;
+use crate::shm::SharedMemoryManager;
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::{info, warn};
 use bitflags::bitflags;
@@ -27,6 +33,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
 use std::io::Error;
+use std::iter::Map;
 use std::num::TryFromIntError;
 use std::os::raw::c_void;
 use std::ptr::null_mut;
@@ -171,10 +178,10 @@ impl Vm {
                 });
 
             loop {
-                info!(
-                    "allocate: candidate {:#x}, len {:#x}, alloc_start {:#x}",
-                    candidate, len, allocation.phys_addr.0
-                );
+                // info!(
+                //     "allocate: candidate {:#x}, len {:#x}, alloc_start {:#x}",
+                //     candidate, len, allocation.phys_addr.0
+                // );
 
                 if candidate + len < allocation.phys_addr.0
                     || (candidate >= (allocation.phys_addr.0 + allocation.len)
@@ -315,7 +322,10 @@ impl Vm {
         prot: Protections,
         phys_addr: PhysAddr,
     ) -> Result<usize, SysErr> {
-        info!("Dmem::mmap()");
+        info!(
+            "Dmem::mmap({:#x}, {:#x}, {:?}, {}, {:?})",
+            addr, len, mem_type, prot, phys_addr
+        );
 
         /// make sure the area is allocated
         for i in self.dmem_allocations.read().unwrap().values().into_iter() {
@@ -470,7 +480,21 @@ impl Vm {
                 return Err(MmapError::NonNegativeFd);
             }
         } else if flags.contains(MappingFlags::MAP_STACK) {
-            todo!("mmap with flags & 0x400");
+            if fd != -1 {
+                return Err(MmapError::NonNegativeFd);
+            } else {
+                let cpu_write_prot = prot.intersects(Protections::CPU_WRITE);
+                if Protections::from_bits_truncate(cpu_write_prot as u32)
+                    .intersection(prot)
+                    .bits()
+                    & 0x3
+                    != 0x3
+                {
+                    return Err(MmapError::InvalidProtectionsForStack);
+                }
+            }
+
+            flags.insert(MappingFlags::MAP_ANON);
         }
 
         flags.remove(MappingFlags::UNK2);
@@ -484,17 +508,8 @@ impl Vm {
         }
 
         if flags.contains(MappingFlags::MAP_FIXED) {
-            let pageoff = offset & 0x3fff;
-            let adjusted_addr = addr - pageoff;
-            let adjusted_len = len + pageoff;
-            let rounded_len = Self::round_page(adjusted_len);
-
-            if (adjusted_addr & 0x3fff) != 0 {
-                return Err(MmapError::InvalidOffset);
-            }
-            // TODO: check if addr is within min and max mappings for this proc
-            if adjusted_addr + rounded_len < adjusted_addr {
-                return Err(MmapError::InvalidOffset);
+            if (addr & 0x3fff) != 0 {
+                return Err(MmapError::InvalidAddr);
             }
         } else if addr == 0 {
             if td
@@ -508,6 +523,12 @@ impl Vm {
         } else if addr == 0x880000000 {
             todo!("mmap with addr = 0x880000000");
         }
+
+        let (fitit, addr) = if flags.intersects(MappingFlags::MAP_FIXED) {
+            (false, addr)
+        } else {
+            (true, addr + 0x3fff & 0xffffffffffffc000)
+        };
 
         let mut file_handle = None;
         if flags.contains(MappingFlags::MAP_VOID) {
@@ -668,6 +689,13 @@ impl Vm {
         len: usize,
         prot: Protections,
     ) -> Result<(), MemoryUpdateError> {
+        if prot.bits() >= 0x10 {
+            warn!(
+                "mprotect with GPU flags: {:#x}+{:#x} {}",
+                addr as usize, len, prot
+            );
+        }
+
         self.update(
             addr,
             len,
@@ -712,9 +740,15 @@ impl Vm {
             return Ok(addr);
         }
 
+        let mut first_run = true;
+
         let mut previous_end = 0x400000; // try minimum mapping
         for i in mappings.range(addr..).into_iter() {
-            // info!("find_free_area: trying {:?}", i);
+            info!("find_free_area: trying {:?}", i);
+            if first_run && *i.0 > (addr + len) {
+                return Ok(addr);
+            }
+
             // if addr > *i.0 || addr < previous_end {
             //     previous_end = (i.1.end() as usize + 0x3fff) & 0xffffffffffffc000;
             //     continue;
@@ -731,6 +765,7 @@ impl Vm {
             }
 
             previous_end = (i.1.end() as usize + 0x3fff) & 0xffffffffffffc000;
+            first_run = false;
         }
 
         error!(
@@ -826,6 +861,21 @@ impl Vm {
                     } else {
                         todo!("{:?}", b.name())
                     }
+                }
+                VFileType::SharedMemory => {
+                    let max_prot = vfile.flags();
+                    if flags.intersects(MappingFlags::MAP_SHARED)
+                        && !prot
+                            .intersection(Protections::CPU_WRITE | Protections::GPU_WRITE)
+                            .is_empty()
+                        && !max_prot.intersects(VFileFlags::WRITE)
+                    {
+                        return Err(MmapError::ConflictingProtections);
+                    }
+
+                    let mapping = SharedMemoryManager::mmap(vfile.clone(), len, file_offset)?;
+
+                    return Ok(VPages::new(self, mapping as _, len));
                 }
                 _ => todo!(),
             }
@@ -1165,7 +1215,9 @@ impl Vm {
             prot
         };
 
-        self.mprotect(addr as _, end - addr, prot)
+        info!("mprotect_internal({:#x}, {:#x}, {})", addr, end, prot);
+
+        self.mprotect(addr as _, len, prot)
             .map_err(|_| SysErr::Raw(EINVAL))?;
 
         Ok(SysOut::ZERO)
@@ -1422,7 +1474,7 @@ impl Vm {
                 warn!("faking start_addr in sys_mmap_dmem");
                 start_addr = 0x500000000;
             } else if start_addr <= 0xff0000000 {
-                start_addr = 0xff0000000;
+                // start_addr = 0xff0000000;
             }
             let unk1 = flags.bits() >> 24 & 0x1f;
             if unk1 > 0xd {
@@ -1437,6 +1489,66 @@ impl Vm {
             .vm()
             .mmap_dmem(start_addr, len, mem_type, prot, PhysAddr(start_phys_addr))
             .map(|x| x.into())
+    }
+
+    pub fn dmem_query(
+        self: &Arc<Self>,
+        dmem_container: DmemContainer,
+        phys_addr: PhysAddr,
+        flags: i32,
+        unk: usize,
+        unk2: usize,
+        td: &VThread,
+    ) -> Result<DmemQueryInfo, DmemIoctlErr> {
+        if dmem_container != DmemContainer::Two && *td.proc().dmem_container() != dmem_container {
+            // check some perm
+            warn!("dmem_query missing perm check");
+        }
+
+        if flags > 1 {
+            // check some perm
+            warn!("dmem_query missing perm check 2");
+        }
+
+        let mut uvar8 = 0;
+
+        if flags < 0 {
+            uvar8 = 1;
+            if unk != 0 {
+                return Err(DmemIoctlErr::InvalidParameters);
+            }
+        } else {
+            uvar8 = 2;
+            if flags & 0x40000000 == 0 {
+                uvar8 = (flags * 4) >> 31 & 3;
+                if unk != 0 {
+                    return Err(DmemIoctlErr::InvalidParameters);
+                }
+            }
+        }
+
+        if flags & 1 != 0 {
+            // find next if no allocation at phys_addr
+            let allocations = self.dmem_allocations.read().unwrap();
+
+            return match allocations.get(&phys_addr) {
+                Some(e) => Ok(DmemQueryInfo {
+                    start: e.phys_addr.0,
+                    end: e.phys_addr.0 + e.len,
+                    mem_type: MemoryType::Any,
+                }),
+                None => match allocations.range(phys_addr..).min() {
+                    Some((phys, alloc)) => Ok(DmemQueryInfo {
+                        start: phys.0,
+                        end: phys.0 + alloc.len,
+                        mem_type: MemoryType::Any,
+                    }),
+                    None => Err(DmemIoctlErr::DmemNotFound),
+                },
+            };
+        } else {
+            todo!()
+        }
     }
 
     fn align_virtual_page(ptr: *mut u8) -> *mut u8 {
@@ -1662,6 +1774,10 @@ pub enum MmapError {
     #[errno(EINVAL)]
     InvalidOffset,
 
+    #[error("invalid address (not page-aligned)")]
+    #[errno(EINVAL)]
+    InvalidAddr,
+
     #[error("invalid flags {0}")]
     #[errno(EINVAL)]
     InvalidFlags(i32),
@@ -1672,6 +1788,14 @@ pub enum MmapError {
 
     #[error("file descriptor is invalid")]
     InvalidFd(#[from] GetFileError),
+
+    #[error("conflicting protections - mapping writable, file not")]
+    #[errno(EACCES)]
+    ConflictingProtections,
+
+    #[error("invalid protections - stack not RW")]
+    #[errno(EINVAL)]
+    InvalidProtectionsForStack,
 }
 
 /// Errors for [`MemoryManager::munmap()`].

@@ -285,6 +285,7 @@ impl RuntimeLinker {
         let module = entry.data().clone().downcast::<Module>().unwrap();
 
         bin.push(module.clone(), main);
+        Self::set_debug_flags(&module);
 
         Ok((module, bin))
     }
@@ -1133,6 +1134,29 @@ impl RuntimeLinker {
         }
 
         Ok(SysOut::ZERO)
+    }
+
+    fn set_debug_flags(md: &Arc<Module>) -> () {
+        let values: Vec<(&str, Vec<(usize, i32)>)> = vec![
+            (
+                "libkernel.prx",
+                vec![(0x71280 as usize, 0xffffff)], //, (0x71288 as usize, 0xffffff)],
+            ),
+            // ("libSceFios2.prx", vec![(0x17c520 as usize, 0x7fffffff)]),
+        ];
+
+        for (lib_name, fixes) in values.iter() {
+            info!("module names: {:?}", md.names());
+            if md.names().contains(&lib_name.to_string()) {
+                unsafe {
+                    for (offset, val) in fixes.iter() {
+                        let mem_addr = md.memory().addr() + md.memory().base() + offset;
+                        *(mem_addr as *mut std::ffi::c_int) = *val;
+                        info!("patched {}", lib_name);
+                    }
+                }
+            }
+        }
     }
 }
 

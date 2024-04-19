@@ -7,12 +7,12 @@ use crate::dev::DmemContainer;
 use crate::errno::{Errno, EINVAL, ERANGE, ESRCH};
 use crate::fs::Vnode;
 use crate::idt::Idt;
-use crate::info;
 use crate::ipmi::IpmiObject;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::sysent::ProcAbi;
 use crate::ucred::{AuthInfo, Gid, Privilege, Ucred, Uid};
 use crate::vm::Vm;
+use crate::{error, info};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
 use macros::Errno;
@@ -364,7 +364,8 @@ impl VProc {
         match level {
             CpuLevel::Which => match which {
                 CpuWhich::Tid => {
-                    todo!();
+                    error!("setaffinity for a thread");
+                    Ok(SysOut::ZERO)
                 }
                 v => todo!("sys_cpuset_setaffinity with which = {v:?}"),
             },

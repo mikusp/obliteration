@@ -437,7 +437,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        Ok(())
     }
 
     fn kern_rngpseudo(

@@ -1,9 +1,10 @@
 use crate::{
-    errno::{Errno, EINVAL, EPERM},
+    errno::{Errno, EACCES, EINVAL, EPERM},
     fs::{CharacterDevice, DeviceDriver, IoCmd},
     info,
     process::VThread,
     syscalls::SysErr,
+    vm::{MemoryType, PhysAddr},
     warn,
 };
 use macros::Errno;
@@ -29,9 +30,9 @@ impl Dmem {
         start: usize,
         end: usize,
         align: usize,
-    ) -> Result<usize, IoctlErr> {
+    ) -> Result<usize, DmemIoctlErr> {
         if align != 0 && align - 1 & align != 0 {
-            return Err(IoctlErr::InvalidParameters);
+            return Err(DmemIoctlErr::InvalidParameters);
         }
 
         let alignment = if align > 0x4000 { align } else { 0x4000 };
@@ -84,7 +85,7 @@ impl DeviceDriver for Dmem {
         let cred = td.cred();
 
         if cred.is_unk1() || cred.is_unk2() {
-            return Err(Box::new(IoctlErr::InsufficientCredentials));
+            return Err(Box::new(DmemIoctlErr::InsufficientCredentials));
         }
 
         let proc_dmem_container = td.proc().dmem_container();
@@ -93,7 +94,7 @@ impl DeviceDriver for Dmem {
             && self.container != *proc_dmem_container
             && !cred.is_system()
         {
-            return Err(Box::new(IoctlErr::InsufficientCredentials));
+            return Err(Box::new(DmemIoctlErr::InsufficientCredentials));
         }
 
         match cmd {
@@ -118,7 +119,7 @@ impl DeviceDriver for Dmem {
                     .proc()
                     .vm()
                     .get_avail_dmem(dmem_container, start, avail.end, avail.align)
-                    .map_err(|_| IoctlErr::InvalidParameters)?;
+                    .map_err(|_| DmemIoctlErr::InvalidParameters)?;
 
                 info!("dmem_get_avail: addr {:#x}, size {:#x}", phys_addr.0, size);
 
@@ -130,7 +131,7 @@ impl DeviceDriver for Dmem {
                     .proc()
                     .vm()
                     .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
-                    .map_err(|_| IoctlErr::InvalidParameters)?;
+                    .map_err(|_| DmemIoctlErr::InvalidParameters)?;
 
                 alloc.start_or_phys_out = phys_addr.0
             }
@@ -139,11 +140,47 @@ impl DeviceDriver for Dmem {
                     .proc()
                     .vm()
                     .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
-                    .map_err(|_| IoctlErr::InvalidParameters)?;
+                    .map_err(|_| DmemIoctlErr::InvalidParameters)?;
 
                 alloc.start_or_phys_out = phys_addr.0
             }
-            IoCmd::DMEMQUERY(_query) => todo!(),
+            IoCmd::DMEMQUERY(query) => {
+                info!(
+                    "DMEMQUERY({}, {:#x}, {:#x}, {:#x}, {})",
+                    query.dmem_container,
+                    query.flags,
+                    query.phys_addr,
+                    query.info_out,
+                    query.info_size
+                );
+
+                let phys_addr = query.phys_addr;
+
+                let dmem_container = if self.container != DmemContainer::Two
+                    && phys_addr > 0x2fffffffff
+                    && phys_addr < 0x3020000000
+                {
+                    DmemContainer::Two
+                } else {
+                    query.dmem_container.try_into().unwrap()
+                };
+
+                let ret = td.proc().vm().dmem_query(
+                    dmem_container,
+                    PhysAddr(phys_addr),
+                    query.flags,
+                    query.unk,
+                    0,
+                    td,
+                )?;
+
+                if query.info_out != 0 && query.info_size == std::mem::size_of::<DmemQueryInfo>() {
+                    unsafe {
+                        info!("dmem_query returning {:?}", ret);
+                        *(query.info_out as *mut DmemQueryInfo) = ret;
+                    }
+                }
+            }
             _ => todo!(),
         }
 
@@ -152,7 +189,7 @@ impl DeviceDriver for Dmem {
 }
 
 #[derive(Error, Debug, Errno)]
-enum IoctlErr {
+pub enum DmemIoctlErr {
     #[error("bad credentials")]
     #[errno(EPERM)]
     InsufficientCredentials,
@@ -160,6 +197,10 @@ enum IoctlErr {
     #[error("bad parameters")]
     #[errno(EINVAL)]
     InvalidParameters,
+
+    #[error("no such area")]
+    #[errno(EACCES)]
+    DmemNotFound,
 }
 
 #[repr(C)]
@@ -198,4 +239,12 @@ pub struct DmemQuery {
     phys_addr: usize,
     info_out: usize,
     info_size: usize,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct DmemQueryInfo {
+    pub start: usize,
+    pub end: usize,
+    pub mem_type: MemoryType,
 }
