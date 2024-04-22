@@ -144,12 +144,19 @@ impl Memory {
         len += segment.len;
         segments.push(segment);
 
+        let name_ = name.into();
+        let addr = if name_ == "executable" {
+            0x40_0000
+        } else {
+            0x8000_0000
+        };
+
         // TODO: Use separate name for our code and data.
         let mut pages = match proc.vm().mmap(
-            0,
+            addr,
             len,
             Protections::empty(),
-            name,
+            name_,
             MappingFlags::MAP_ANON | MappingFlags::MAP_PRIVATE,
             -1,
             0,
@@ -508,13 +515,13 @@ pub enum CodeWorkspaceError {
 /// Represents an error when [`Memory::unprotect_segment()`] is failed.
 #[derive(Debug, Error)]
 pub enum UnprotectSegmentError {
-    #[error("cannot protect {1:#018x} bytes starting at {0:#x} with {2}")]
+    #[error("cannot unprotect segment {1:#018x} bytes starting at {0:#x} with {2}")]
     MprotectFailed(usize, usize, Protections, #[source] MemoryUpdateError),
 }
 
 /// Represents an error when [`Memory::unprotect()`] is failed.
 #[derive(Debug, Error)]
 pub enum UnprotectError {
-    #[error("cannot protect {1:#018x} bytes starting at {0:#x} with {2}")]
+    #[error("cannot unprotect {1:#018x} bytes starting at {0:#x} with {2}")]
     MprotectFailed(usize, usize, Protections, #[source] MemoryUpdateError),
 }

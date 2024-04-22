@@ -352,7 +352,7 @@ impl RuntimeLinker {
             )
         };
 
-        sym.map(|(m, s)| m.memory().addr() + m.memory().base() + m.symbol(s).unwrap().value())
+        sym.map(|(m, s)| m.memory().addr() + m.symbol(s).unwrap().value())
     }
 
     fn get_nid(name: &str) -> String {

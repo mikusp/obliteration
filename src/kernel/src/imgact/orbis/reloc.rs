@@ -37,6 +37,7 @@ impl<'a> Iterator for Relocations<'a> {
 }
 
 /// An implementation of `Elf64_Rela`.
+#[derive(Debug)]
 pub struct Relocation {
     offset: usize,
     info: u64,

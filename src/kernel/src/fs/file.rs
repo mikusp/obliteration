@@ -133,7 +133,7 @@ impl Read for VFile {
 
 /// Type of [`VFile`].
 #[repr(i16)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VFileType {
     Vnode = 1,        // DTYPE_VNODE
     Socket = 2,       // DTYPE_SOCKET

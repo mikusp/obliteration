@@ -29,6 +29,7 @@ use gmtx::Gutex;
 use gmtx::GutexGroup;
 use macros::Errno;
 use std::cmp::max;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
@@ -37,6 +38,7 @@ use std::iter::Map;
 use std::num::TryFromIntError;
 use std::os::raw::c_void;
 use std::ptr::null_mut;
+use std::sync::RwLockWriteGuard;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
@@ -97,12 +99,12 @@ impl Vm {
         };
 
         // Allocate main stack.
-        let guard = match mm.mmap(
-            0,
+        let stack_top = match mm.mmap(
+            0x7_F000_0000,
             mm.stack.len() + Self::VIRTUAL_PAGE_SIZE,
             mm.stack.prot(),
             "main stack",
-            MappingFlags::MAP_ANON | MappingFlags::MAP_PRIVATE,
+            MappingFlags::MAP_ANON | MappingFlags::MAP_PRIVATE | MappingFlags::MAP_STACK,
             -1,
             0,
         ) {
@@ -111,13 +113,18 @@ impl Vm {
         };
 
         // Set the guard page to be non-accessible.
-        if let Err(e) = mm.mprotect(guard, Self::VIRTUAL_PAGE_SIZE, Protections::empty()) {
+        if let Err(e) = mm.mprotect(
+            stack_top.wrapping_sub(mm.stack.len() + Self::VIRTUAL_PAGE_SIZE),
+            Self::VIRTUAL_PAGE_SIZE,
+            Protections::empty(),
+        ) {
             return Err(MemoryManagerError::GuardStackFailed(e));
         }
 
-        mm.stack.set_guard(guard);
         mm.stack
-            .set_stack(unsafe { guard.add(Self::VIRTUAL_PAGE_SIZE) });
+            .set_guard(stack_top.wrapping_sub(mm.stack.len() + Self::VIRTUAL_PAGE_SIZE));
+        mm.stack
+            .set_stack(unsafe { stack_top.wrapping_sub(mm.stack.len()) });
 
         // Register syscall handlers.
         let mm = Arc::new(mm);
@@ -439,15 +446,16 @@ impl Vm {
         (addr + 0x3fff) & !(0x3fff)
     }
 
+    /// look at sys_mmap on PS4
     pub fn mmap<N: Into<String>>(
         &self,
-        addr: usize,
+        mut addr: usize,
         len: usize,
         prot: Protections,
         name: N,
         mut flags: MappingFlags,
         fd: i32,
-        offset: usize,
+        mut offset: usize,
     ) -> Result<VPages<'_>, MmapError> {
         let name = name.into();
         info!(
@@ -472,6 +480,7 @@ impl Vm {
         if len == 0 {
             todo!("mmap with len = 0");
         }
+        let cpu_write_prot = prot.intersects(Protections::CPU_WRITE);
 
         if flags.intersects(MappingFlags::MAP_VOID | MappingFlags::MAP_ANON) {
             if offset != 0 {
@@ -483,7 +492,6 @@ impl Vm {
             if fd != -1 {
                 return Err(MmapError::NonNegativeFd);
             } else {
-                let cpu_write_prot = prot.intersects(Protections::CPU_WRITE);
                 if Protections::from_bits_truncate(cpu_write_prot as u32)
                     .intersection(prot)
                     .bits()
@@ -495,6 +503,7 @@ impl Vm {
             }
 
             flags.insert(MappingFlags::MAP_ANON);
+            offset = 0;
         }
 
         flags.remove(MappingFlags::UNK2);
@@ -507,45 +516,60 @@ impl Vm {
             return Err(MmapError::InvalidOffset);
         }
 
-        if flags.contains(MappingFlags::MAP_FIXED) {
-            if (addr & 0x3fff) != 0 {
+        if !flags.intersects(MappingFlags::MAP_FIXED) {
+            if addr == 0 {
+                if td
+                    .as_ref()
+                    .is_some_and(|t| (t.proc().app_info().unk1() & 2) == 0)
+                {
+                    // TODO: Check what the is value at offset 0x140 on vm_map. (pmap?)
+                    warn!("mmap with addr = 0 and appinfo.unk1 & 2 == 0");
+                    addr = 0x2_0000_0000;
+                }
+            } else if (addr & 0xfffffffdffffffff) == 0 {
+                // TODO: Check what the is value at offset 0x140 on vm_map. (pmap?)
+                warn!("addr & 0xfffffffdffffffff");
+                addr = 0x2_0000_0000;
+            } else if addr == 0x880000000 {
+                todo!("mmap with addr = 0x880000000");
+            }
+        } else {
+            addr = addr - offset & 0x3fff;
+            if addr & 0x3fff != 0 || !addr < len {
                 return Err(MmapError::InvalidAddr);
             }
-        } else if addr == 0 {
-            if td
-                .as_ref()
-                .is_some_and(|t| (t.proc().app_info().unk1() & 2) != 0)
-            {
-                todo!("mmap with addr = 0 and appinfo.unk1 & 2 != 0");
-            }
-        } else if (addr & 0xfffffffdffffffff) == 0 {
-            // TODO: Check what the is value at offset 0x140 on vm_map.
-        } else if addr == 0x880000000 {
-            todo!("mmap with addr = 0x880000000");
         }
 
-        let (fitit, addr) = if flags.intersects(MappingFlags::MAP_FIXED) {
-            (false, addr)
-        } else {
-            (true, addr + 0x3fff & 0xffffffffffffc000)
-        };
-
         let mut file_handle = None;
+        let mut max_prot = Protections::empty();
         if flags.contains(MappingFlags::MAP_VOID) {
             flags |= MappingFlags::MAP_ANON;
 
             if let Some(ref td) = td {
                 td.set_fpop(None);
             }
-        } else if !flags.contains(MappingFlags::MAP_ANON) {
+        } else if flags.contains(MappingFlags::MAP_ANON) {
+            max_prot = Protections::all();
+        } else {
+            let bvar4 = (cpu_write_prot as u32 | prot.bits() & 0x11) == 0;
+            let bvar2 = Protections::from_bits_retain(bvar4 as u32 ^ 5);
+            max_prot = Protections::from_bits_retain(bvar4 as u32 ^ 7);
+            if !flags.intersects(MappingFlags::MAP_SHARED) || prot.bits() & 0x22 == 0 {
+                max_prot = bvar2;
+            }
+
             if let Some(ref td) = td {
                 let file = td
                     .proc()
                     .files()
                     .get(fd)
                     .map_err(|err| MmapError::InvalidFd(err))?;
+                file_handle = Some(file.clone());
+
+                match *file.ty() {
+                    _ => warn!("ignored vfile mmapping"),
+                }
                 td.set_fpop(Some(file.clone()));
-                file_handle = Some(file);
             }
         }
 
@@ -553,8 +577,12 @@ impl Vm {
             todo!("mmap with flags & 0x200000 != 0");
         }
 
-        if td.is_some_and(|t| (t.proc().app_info().unk1() & 2) != 0) {
-            todo!("mmap with addr = 0 and appinfo.unk1 & 2 != 0");
+        if addr == 0
+            && td
+                .as_ref()
+                .is_some_and(|t| (t.proc().app_info().unk1() & 2) != 0)
+        {
+            addr = 0xfc0000000;
         }
 
         // Round len up to virtual page boundary.
@@ -563,7 +591,23 @@ impl Vm {
             r => len + (Self::VIRTUAL_PAGE_SIZE - r),
         };
 
-        self.map(addr, len, flags, prot, name, file_handle, offset as i64)
+        let ret = self.map(
+            addr,
+            len,
+            flags,
+            prot,
+            max_prot,
+            name,
+            file_handle,
+            offset as i64 & 0xffffffffffffc000u64 as i64,
+        )?;
+
+        if let Some(ref td) = td.as_ref() {
+            td.set_fpop(None);
+        }
+
+        // add offset & PAGE_MASK to the returned value
+        return Ok(ret);
     }
 
     fn mlock(&self, addr: usize, len: usize) -> Result<(), SysErr> {
@@ -782,9 +826,10 @@ impl Vm {
         len: usize,
         mut flags: MappingFlags,
         prot: Protections,
+        max_prot: Protections,
         name: String,
         file_handle: Option<Arc<VFile>>,
-        file_offset: i64,
+        mut file_offset: i64,
     ) -> Result<VPages<'_>, MmapError> {
         // TODO: Check what is PS4 doing here.
         use std::collections::btree_map::Entry;
@@ -793,23 +838,21 @@ impl Vm {
         let addr = (addr + 0x3fff) & 0xffffffffffffc000;
         let size = (len + 0x3fff) & 0xffffffffffffc000;
 
-        let addr = if flags.intersects(MappingFlags::MAP_FIXED) {
-            addr
-        } else {
-            self.find_free_area(addr, len)?
-        };
-        // info!("found addr {:#x}", addr);
-        let alloc = match self.alloc(addr, len, prot, name) {
-            Ok(v) => v,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::OutOfMemory {
-                    return Err(MmapError::NoMem(len));
-                } else {
-                    // We should not hit other error except for out of memory.
-                    panic!("Failed to allocate {len} bytes: {e}.");
-                }
+        if file_offset & 0x3fff != 0 {
+            return Err(MmapError::InvalidOffset);
+        }
+
+        let (fitit, addr) = if flags.intersects(MappingFlags::MAP_FIXED) {
+            if addr & 0x3fff != 0 {
+                return Err(MmapError::InvalidAddr);
             }
+
+            (false, addr)
+        } else {
+            (true, addr + 0x3fff & 0xffffffffffffc000)
         };
+
+        let vm_object = None;
 
         if let Some(ref vfile) = file_handle {
             match &vfile.ty() {
@@ -881,16 +924,400 @@ impl Vm {
             }
         }
 
+        let mut unk = 0;
+        if !flags.intersects(MappingFlags::MAP_ANON) {
+            unk = !flags.intersects(MappingFlags::MAP_PREFAULT_READ) as i32 * 8 + 8;
+        } else {
+            if file_handle.is_none() {
+                file_offset = 0;
+            }
+        }
+
+        let mut cow = unk | 2;
+
+        if !flags
+            .intersection(MappingFlags::MAP_ANON | MappingFlags::MAP_SHARED)
+            .is_empty()
+        {
+            cow = unk;
+        }
+
+        unk = cow + 0x400;
+        let bvar3 = false; // it gets set in vnode processing in some case, otherwise false
+        if !bvar3 {
+            unk = cow;
+        }
+
+        let flags_bits = flags.bits() as i32;
+        unk = unk + (flags_bits >> 9 & 0x100 | flags_bits >> 6 & 0x20) + flags_bits & 0x2000 * 8;
+
+        cow = unk | 0x30000;
+        if !flags.intersects(MappingFlags::MAP_SANITIZER) {
+            cow = unk;
+        }
+
+        unk = 0x420000;
+        if file_handle
+            .as_ref()
+            .map(|x| *x.ty() != VFileType::Blockpool)
+            .unwrap_or(true)
+        {
+            unk = flags.intersection(MappingFlags::MAP_NO_COALESCE).bits() as i32;
+        }
+
+        let effective_prot = max_prot.intersection(prot);
+
+        if effective_prot == prot || addr >> 34 < 0x3f {
+            if addr + len > 0xfc00000000 {
+                return Err(MmapError::ProtectedArea);
+            }
+
+            cow = cow | unk;
+
+            let mapping = if !flags.intersects(MappingFlags::MAP_STACK) {
+                if fitit {
+                    let find_space_initial_val = flags.bits() >> 0x18 & 0x1f;
+                    let find_space = if find_space_initial_val < 14 {
+                        if vm_object.is_none() {
+                            // || vm_object.type != 3
+                            (flags.bits() >> 20 & 1) * 3 + 1
+                        } else {
+                            (flags.bits() >> 20 & 1) * 3 + 2
+                        }
+                    } else {
+                        find_space_initial_val
+                    };
+
+                    self.map_find(
+                        vm_object,
+                        file_offset,
+                        addr,
+                        len,
+                        find_space,
+                        prot,
+                        max_prot,
+                        cow,
+                        flags,
+                        name,
+                    )
+                } else {
+                    self.map_fixed(
+                        vm_object,
+                        file_offset,
+                        addr,
+                        len,
+                        prot,
+                        max_prot,
+                        cow,
+                        flags,
+                    )
+                }
+            } else {
+                self.map_stack(addr, len, prot, max_prot, cow | 0x1000, name)
+            }?;
+
+            let _ = self.validate_mappings();
+
+            if let Some(vfile) = file_handle {
+                if *vfile.ty() == VFileType::Blockpool {
+                    todo!()
+                }
+            }
+
+            if flags.intersects(MappingFlags::MAP_STACK) {
+                return Ok(VPages::new(self, mapping.end(), mapping.len));
+            } else {
+                return Ok(VPages::new(self, mapping.addr, mapping.len));
+            }
+
+            // some logic at the end
+            // if !flags.intersects(MappingFlags::MAP_SHARED) ||
+        } else {
+            return Err(MmapError::NoMem(len));
+        }
+    }
+
+    fn map_find(
+        &self,
+        vm_object: Option<()>,
+        file_offset: i64,
+        mut start_addr: usize,
+        len: usize,
+        find_space: u32,
+        prot: Protections,
+        max_prot: Protections,
+        cow: i32,
+        flags: MappingFlags,
+        name: String,
+    ) -> Result<Mapping, MmapError> {
+        let flag_unk2_zero = !flags.intersects(MappingFlags::UNK2);
+        let start = if flag_unk2_zero || find_space != 1 {
+            start_addr
+        } else {
+            start_addr + 0x1fffff & 0xffffffffffe00000
+        };
+
+        let length = if cow & 0x40000 == 0 {
+            len
+        } else {
+            len + 0x4000
+        };
+
+        let uvar8 = if flag_unk2_zero { 0x4000 } else { 0x200000 };
+
+        let svar7 = if flag_unk2_zero { 14 } else { 21 };
+
+        let uvar6 = !0 << (find_space & 0x3f);
+
+        if find_space != 0 {
+            loop {
+                start_addr = self.findspace(start, length)?;
+
+                if flag_unk2_zero || find_space != 1 {
+                    break;
+                }
+
+                if start_addr < 0x80000000 || length + start_addr > 0x1ffffffff {
+                    info!("1104");
+                    return Err(MmapError::NoMem(len));
+                }
+
+                if start_addr & 0x1fffff == 0 {
+                    todo!()
+                }
+
+                todo!()
+            }
+
+            if find_space | 1 == 5 {
+                if start < 0x400000 {
+                    return Err(MmapError::InvalidAddr);
+                }
+                todo!()
+            }
+
+            if start
+                .checked_sub(0x200000000)
+                .map(|v| v < 0x500000001)
+                .unwrap_or(true)
+            {
+                //something with pmap???
+            } else if start >> 47 != 0 {
+                todo!()
+            }
+
+            if flags.intersects(MappingFlags::MAP_SANITIZER)
+                || (start >> 34 < 0x3f && start + len < 0xfc00000001)
+                || (VThread::current().unwrap().proc().sdk_ver().unwrap() < 0x3000000)
+            {
+                if find_space == 5 || find_space == 2 {
+                    todo!()
+                } else if find_space > 0xd {
+                    start_addr = start_addr + !uvar6 & uvar6;
+                }
+
+                let mappings = self.mappings.write().unwrap();
+                let mapping = self.insert_mapping(mappings, start_addr, len, prot, name);
+
+                if find_space < 0xf && find_space != 2 {
+                    return mapping;
+                } else {
+                    if mapping.is_ok() {
+                        return mapping;
+                    } else {
+                        todo!()
+                    }
+                }
+            } else {
+                return Err(MmapError::NoMem(len));
+            }
+        }
+
+        todo!()
+    }
+
+    fn findspace(&self, start: usize, len: usize) -> Result<usize, MmapError> {
+        let mappings = self.mappings.write().unwrap();
+
+        let area_end = |a| {
+            if a >= 0x40_0000 && a < 0x8000_0000 {
+                0x8000_0000
+            } else if a >= 0x8000_0000 && a < 0x2_0000_0000 {
+                0x2_0000_0000
+            } else if a >= 0x2_0000_0000 && a < 0x7_0000_0000 {
+                0x7_0000_0000
+            } else if a >= 0xF_E000_0000 && a < 0xF_F000_0000 {
+                0xF_F000_0000
+            } else {
+                todo!("area_end {:#x}", a);
+            }
+        };
+
+        let mut start = start;
+        let mut end = start + len;
+        'outer: loop {
+            if start >= area_end(start) {
+                break;
+            }
+
+            let potential_conflicts = mappings.range(start..end);
+
+            for (_entry_addr, mapping) in potential_conflicts {
+                if (end <= mapping.addr as usize) || (start >= mapping.end() as usize) {
+                    continue;
+                } else {
+                    // conflicting areas
+                    start = Self::round_page(start + mapping.len);
+                    end = Self::round_page(end + mapping.len);
+                    continue 'outer;
+                }
+            }
+
+            return Ok(start);
+        }
+
+        return Err(MmapError::NoMem(len));
+    }
+
+    fn map_fixed(
+        &self,
+        vm_object: Option<()>,
+        file_offset: i64,
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        max_prot: Protections,
+        cow: i32,
+        flags: MappingFlags,
+    ) -> Result<Mapping, MmapError> {
+        info!(
+            "map_fixed({:?}, {:#x}, {:#x}, {:#x}, {}. {}, {:#x}, {})",
+            vm_object, file_offset, addr, len, prot, max_prot, cow, flags
+        );
+        todo!()
+    }
+
+    fn map_stack(
+        &self,
+        top_addr: usize,
+        len: usize,
+        prot: Protections,
+        max_prot: Protections,
+        cow: i32,
+        name: String,
+    ) -> Result<Mapping, MmapError> {
+        info!(
+            "map_stack({:#x}, {:#x}, {}, {}, {:#x})",
+            top_addr, len, prot, max_prot, cow
+        );
+
+        if (top_addr >> 47 != 0 || (top_addr < 0xfc00000001 && (top_addr - len < 0xfc00000001)))
+            || VThread::current().unwrap().proc().sdk_ver().unwrap() < 0x3000000
+        {
+            let mappings = self.mappings.write().unwrap();
+
+            let mut end = top_addr;
+            let mut start = top_addr - len;
+            'outer: loop {
+                if start < 0x7_E000_0000 {
+                    return Err(MmapError::NoMem(len));
+                }
+
+                let potential_conflicts = mappings.range(start..end);
+
+                for (_entry_addr, mapping) in potential_conflicts {
+                    if (start >= mapping.addr as usize && start < mapping.end() as usize)
+                        || (end >= mapping.addr as usize && end < mapping.end() as usize)
+                    {
+                        // conflicting areas
+                        end = end - 0x4000;
+                        start = start - 0x4000;
+                        continue 'outer;
+                    }
+                }
+
+                let m = self.insert_mapping(mappings, start, len, prot, name)?;
+
+                return Ok(m);
+            }
+        } else {
+            return Err(MmapError::NoMem(len));
+        }
+    }
+
+    fn insert_mapping(
+        &self,
+        mut locked_mappings: RwLockWriteGuard<'_, BTreeMap<usize, Mapping>>,
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        name: String,
+    ) -> Result<Mapping, MmapError> {
+        let alloc = match self.alloc(addr, len, prot, name) {
+            Ok(v) => v,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::OutOfMemory {
+                    info!("1274");
+                    return Err(MmapError::NoMem(len));
+                } else {
+                    // We should not hit other error except for out of memory.
+                    panic!("Failed to allocate {len} bytes: {e}.");
+                }
+            }
+        };
+
         // Store allocation info.
-        let mut mappings = self.mappings.write().unwrap();
-        let mapping = match mappings.entry(alloc.addr as usize) {
+        let mapping = match locked_mappings.entry(alloc.addr as usize) {
             Entry::Occupied(e) => {
                 panic!("Address {:p} is already allocated. {:?}", e.key(), e)
             }
             Entry::Vacant(e) => e.insert(alloc),
         };
 
-        Ok(VPages::new(self, mapping.addr, mapping.len))
+        return Ok(mapping.clone());
+    }
+
+    fn validate_mappings(&self) -> i32 {
+        let mappings = self.mappings.read().unwrap();
+
+        if mappings.len() < 2 {
+            for m in mappings.iter() {
+                if *m.0 != m.1.addr as usize {
+                    panic!("{:#x} != {:#x} for {:?}", m.0, m.1.addr as usize, m.1);
+                }
+            }
+        } else {
+            let _: Vec<_> = mappings
+                .clone()
+                .into_iter()
+                .map_windows(|[prev, next]| {
+                    if prev.0 != prev.1.addr as usize {
+                        panic!(
+                            "{:#x} != {:#x} for {:?}",
+                            prev.0, prev.1.addr as usize, prev.1
+                        );
+                    }
+                    if next.0 != next.1.addr as usize {
+                        panic!(
+                            "{:#x} != {:#x} for {:?}",
+                            next.0, next.1.addr as usize, next.1
+                        );
+                    }
+
+                    if prev.1.addr as usize + prev.1.len > next.1.addr as usize {
+                        panic!(
+                            "mapping {:?}\n overlaps {:?}\n - {:#x} >= {:#x}",
+                            prev.1,
+                            next.1,
+                            prev.1.end() as usize,
+                            next.1.addr as usize
+                        );
+                    }
+                })
+                .collect();
+        }
+
+        0
     }
 
     fn update<F, U>(
@@ -908,7 +1335,7 @@ impl Vm {
         let first = addr as usize;
 
         if first % Self::VIRTUAL_PAGE_SIZE != 0 {
-            return Err(MemoryUpdateError::UnalignedAddr);
+            return Err(MemoryUpdateError::UnalignedAddr(first));
         } else if len == 0 {
             return Err(MemoryUpdateError::ZeroLen);
         }
@@ -1029,28 +1456,12 @@ impl Vm {
     ) -> Result<Mapping, std::io::Error> {
         use self::storage::Memory;
 
-        // Determine how to allocate.
-        let (addr, len, storage) = if self.allocation_granularity < Self::VIRTUAL_PAGE_SIZE {
-            // If allocation granularity is smaller than the virtual page that mean the result of
-            // mmap may not aligned correctly. In this case we need to do 2 allocations. The first
-            // allocation will be large enough for a second allocation with fixed address.
-            // The whole idea is coming from: https://stackoverflow.com/a/31411825/1829232
-            let len = len + (Self::VIRTUAL_PAGE_SIZE - self.allocation_granularity);
-            let storage = Memory::new(addr, len)?;
+        if addr & 0x3fff != 0 {
+            panic!("unaligned addr in alloc {:#x}", addr);
+        }
 
-            // Do the second allocation.
-            let addr = Self::align_virtual_page(storage.ptr());
-            let len = len - ((addr as usize) - (storage.ptr() as usize));
-
-            (addr, len, storage)
-        } else {
-            // If allocation granularity is equal or larger than the virtual page that mean the
-            // result of mmap will always aligned correctly.
-            let storage = Memory::new(addr, len)?;
-            let addr = storage.ptr();
-
-            (addr, len, storage)
-        };
+        let storage = Memory::new(addr, len)?;
+        let addr = storage.ptr();
 
         storage.commit(addr, len, prot)?;
 
@@ -1587,7 +1998,7 @@ impl Vm {
 unsafe impl Sync for Vm {}
 
 /// Contains information for an allocation of virtual pages.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Mapping {
     addr: *mut u8,
     len: usize,
@@ -1796,6 +2207,10 @@ pub enum MmapError {
     #[error("invalid protections - stack not RW")]
     #[errno(EINVAL)]
     InvalidProtectionsForStack,
+
+    #[error("protected area: 0xfc00000000")]
+    #[errno(EACCES)]
+    ProtectedArea,
 }
 
 /// Errors for [`MemoryManager::munmap()`].
@@ -1813,8 +2228,8 @@ pub enum MunmapError {
 /// Represents an error when update operations on the memory is failed.
 #[derive(Debug, Error)]
 pub enum MemoryUpdateError {
-    #[error("addr is not aligned")]
-    UnalignedAddr,
+    #[error("addr {0:#x} is not aligned")]
+    UnalignedAddr(usize),
 
     #[error("len is zero")]
     ZeroLen,
@@ -1861,7 +2276,7 @@ impl TryFrom<i32> for BatchMapOp {
 }
 
 #[repr(i32)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum MemoryType {
     WbOnion = 0,
     WcGarlic = 3,
