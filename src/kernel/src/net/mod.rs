@@ -2,7 +2,7 @@ use crate::budget::BudgetType;
 use crate::errno::{Errno, EFAULT, EINVAL, ENAMETOOLONG};
 use crate::fs::{IoVec, VFile, VFileFlags, VFileType};
 use crate::process::GetSocketError;
-use crate::{arnd, info};
+use crate::{arnd, info, warn};
 use crate::{
     process::VThread,
     syscalls::{SysErr, SysIn, SysOut, Syscalls},
@@ -51,7 +51,8 @@ impl NetManager {
             MessageFlags::from_bits_retain(flags)
         };
 
-        todo!()
+        warn!("stubbed sys_recvmsg");
+        Ok(SysOut::ZERO)
     }
 
     fn sys_sendmsg(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -208,7 +209,7 @@ impl NetManager {
                     ty,
                     VFileFlags::READ | VFileFlags::WRITE,
                     None,
-                    todo!(),
+                    Box::new(SocketFileBackend(so)),
                 ))
             },
             budget,
@@ -234,7 +235,8 @@ impl NetManager {
     fn connect(&self, fd: i32, addr: &SockAddr, td: &VThread) -> Result<(), ConnectError> {
         let socket = td.proc().files().get_socket(fd)?;
 
-        todo!()
+        warn!("stubbed NetManager::connect");
+        Ok(())
     }
 
     fn sys_getsockopt(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {

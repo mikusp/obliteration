@@ -2,6 +2,7 @@ use super::{SockAddr, Socket, SocketBackend};
 use crate::errno::Errno;
 use crate::fs::IoCmd;
 use crate::process::VThread;
+use crate::warn;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -13,7 +14,8 @@ pub(super) enum UnixProtocol {
 
 impl SocketBackend for UnixProtocol {
     fn attach(&self, _: &Arc<Socket>, _: &VThread) -> Result<(), Box<dyn Errno>> {
-        todo!()
+        warn!("stubbed UnixProtocol::attach");
+        Ok(())
     }
 
     fn bind(

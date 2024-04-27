@@ -3,9 +3,10 @@ use crate::errno::{Errno, EBADF, ENOTSOCK};
 use crate::error;
 use crate::fs::{FileBackend, IoLen, VFile, VFileFlags, VFileType, Vnode};
 use crate::kqueue::KernelQueue;
-use crate::net::Socket;
+use crate::net::{Socket, SocketFileBackend};
 use gmtx::{Gutex, GutexGroup};
 use macros::Errno;
+use std::any::Any;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::ffi::CStr;
@@ -203,7 +204,10 @@ impl FileDesc {
             return Err(GetSocketError::NotSocket);
         };
 
-        Ok(todo!())
+        let so: &SocketFileBackend = (file.backend().as_ref() as &dyn Any)
+            .downcast_ref()
+            .expect("socket");
+        Ok(so.0.clone())
     }
 
     /// See `fget` on the PS4 for a reference.
