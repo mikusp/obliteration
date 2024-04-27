@@ -4,6 +4,7 @@ use super::{
 };
 use crate::budget::ProcType;
 use crate::dev::DmemContainer;
+use crate::ee::native;
 use crate::errno::{Errno, EINVAL, ERANGE, ESRCH};
 use crate::fs::Vnode;
 use crate::idt::Idt;
@@ -12,12 +13,13 @@ use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::sysent::ProcAbi;
 use crate::ucred::{AuthInfo, Gid, Privilege, Ucred, Uid};
 use crate::vm::Vm;
-use crate::{error, info};
+use crate::{error, info, warn};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
 use macros::Errno;
 use std::any::Any;
 use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::mem::size_of;
 use std::mem::zeroed;
 use std::num::NonZeroI32;
@@ -250,7 +252,7 @@ impl VProc {
 
     unsafe fn thr_new(&self, td: &VThread, param: &ThrParam) -> Result<SysOut, CreateThreadError> {
         if param.rtprio != null() {
-            todo!("thr_new with non-null rtp");
+            warn!("thr_new with non-null rtp");
         }
 
         self.create_thread(
@@ -260,10 +262,12 @@ impl VProc {
             param.stack_base,
             param.stack_size,
             param.tls_base,
+            param.tls_size,
             param.child_tid,
             param.parent_tid,
             param.flags,
             param.rtprio,
+            param.name,
         )
     }
 
@@ -273,15 +277,68 @@ impl VProc {
         td: &VThread,
         start_func: fn(usize),
         arg: usize,
-        stack_base: *const u8,
+        stack_base: usize,
         stack_size: usize,
         tls_base: *const u8,
+        tls_size: usize,
         child_tid: *mut i64,
         parent_tid: *mut i64,
         flags: i32,
         rtprio: *const RtPrio,
+        name: usize,
     ) -> Result<SysOut, CreateThreadError> {
-        todo!()
+        let thr_name = if name != 0 {
+            Some(unsafe { CStr::from_ptr(name as _).to_str().unwrap() })
+        } else {
+            None
+        };
+
+        info!(
+            "create_thread({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?})",
+            start_func as usize,
+            arg as usize,
+            stack_base,
+            stack_size,
+            tls_base as usize,
+            tls_size,
+            child_tid as usize,
+            parent_tid as usize,
+            flags,
+            rtprio as usize,
+            thr_name
+        );
+        let new_td = VThread::new(VThread::current().unwrap().proc().clone());
+        new_td.pcb_mut().set_fsbase(tls_base as _);
+        let entry = native::RawFn {
+            md: Arc::new(()),
+            addr: start_func as usize,
+        };
+        let entry = move || unsafe { entry.exec1(arg) };
+        // let stack_ptr = {
+        //     let top = (stack_base) & 0xffffffffffffc000;
+
+        //     top
+        // };
+        info!("create thread stack top: {:#x}", stack_base);
+        let ret = unsafe { new_td.start(stack_base as *mut u8, stack_size, entry) };
+        match ret {
+            Ok(ret) => unsafe {
+                if let Some(n) = thr_name {
+                    let cs = CString::new(String::from_utf8(n.bytes().take(15).collect()).unwrap())
+                        .unwrap();
+                    libc::pthread_setname_np(ret, cs.as_ptr());
+                }
+
+                if !child_tid.is_null() {
+                    *child_tid = ret as _;
+                }
+                if !parent_tid.is_null() {
+                    *parent_tid = ret as _;
+                }
+                Ok(0.into())
+            },
+            Err(e) => Err(CreateThreadError::SpawnError(e)),
+        }
     }
 
     fn sys_rtprio_thread(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -291,7 +348,8 @@ impl VProc {
         let rtp = unsafe { &mut *rtp };
 
         if function == RtpFunction::Set {
-            todo!("rtprio_thread with function = 1");
+            error!("rtprio_thread with function = 1");
+            return Ok(SysOut::ZERO);
         }
 
         if function == RtpFunction::Unk && td.cred().is_system() {
@@ -516,7 +574,7 @@ impl VProc {
 struct ThrParam {
     start_func: fn(usize),
     arg: usize,
-    stack_base: *const u8,
+    stack_base: usize,
     stack_size: usize,
     tls_base: *const u8,
     tls_size: usize,
@@ -524,7 +582,8 @@ struct ThrParam {
     parent_tid: *mut i64,
     flags: i32,
     rtprio: *const RtPrio,
-    spare: [usize; 3],
+    name: usize,
+    spare: [usize; 2],
 }
 
 const _: () = assert!(size_of::<ThrParam>() == 0x68);
@@ -582,4 +641,8 @@ bitflags! {
 }
 
 #[derive(Debug, Error, Errno)]
-pub enum CreateThreadError {}
+pub enum CreateThreadError {
+    #[error("couldn't spawn a thread")]
+    #[errno(EINVAL)]
+    SpawnError(#[from] llt::SpawnError),
+}
