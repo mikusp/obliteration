@@ -5,6 +5,7 @@ use crate::fs::{
 };
 use crate::process::{FileDesc, VThread};
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::{error, warn};
 use std::convert::Infallible;
 use std::sync::{Arc, Weak};
 
@@ -20,8 +21,9 @@ impl KernelQueueManager {
         kq
     }
 
-    fn sys_kqueueex(self: &Arc<Self>, _: &VThread, _: &SysIn) -> Result<SysOut, SysErr> {
-        todo!()
+    fn sys_kqueueex(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        warn!("sys_kqueueex stubbed");
+        self.sys_kqueue(td, i)
     }
 
     fn sys_kqueue(self: &Arc<Self>, td: &VThread, _: &SysIn) -> Result<SysOut, SysErr> {
