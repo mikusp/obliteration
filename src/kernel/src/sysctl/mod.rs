@@ -6,6 +6,7 @@ use crate::errno::{
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::vm::Vm;
+use crate::warn;
 use std::any::Any;
 use std::cmp::min;
 use std::ptr::null_mut;
@@ -437,6 +438,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
+        warn!("stubbed kern_cpumode");
         Ok(())
     }
 
@@ -447,7 +449,8 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
-        todo!()
+        warn!("stubbed kern_rngpseudo");
+        Ok(())
     }
 
     fn budgets_mlock_avail(
@@ -457,6 +460,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
+        warn!("stubbed budgets_mlock_avail");
         Ok(())
     }
 
@@ -467,6 +471,7 @@ impl Sysctl {
         _: usize,
         _req: &mut SysctlReq,
     ) -> Result<(), SysErr> {
+        warn!("stubbed budgets_mlock_total");
         Ok(())
     }
 
