@@ -395,8 +395,22 @@ impl NativeEngine {
         asm.mov(rdx, rax).unwrap();
         asm.mov(rsi, rbx).unwrap();
         asm.mov(rdi, Arc::as_ptr(&*ee) as u64).unwrap();
+        asm.push(rdi).unwrap();
+        asm.push(rsi).unwrap();
+        asm.push(rdx).unwrap();
+        asm.push(rdx).unwrap();
+        asm.mov(rax, Self::kernel_stack as u64).unwrap();
+        asm.call(rax).unwrap();
+        asm.pop(rdx).unwrap();
+        asm.pop(rdx).unwrap();
+        asm.pop(rsi).unwrap();
+        asm.pop(rdi).unwrap();
+        asm.xchg(rax, rsp).unwrap();
+        asm.push(rax).unwrap();
+        asm.push(rax).unwrap();
         asm.mov(rax, Self::syscall as u64).unwrap();
         asm.call(rax).unwrap();
+        asm.pop(rsp).unwrap();
 
         // Check error. This mimic the behavior of
         // https://github.com/freebsd/freebsd-src/blob/release/9.1.0/sys/amd64/amd64/vm_machdep.c#L380.
@@ -446,6 +460,10 @@ impl NativeEngine {
             .abi()
             .syscalls()
             .exec(i, o)
+    }
+
+    unsafe extern "sysv64" fn kernel_stack(&self) -> usize {
+        VThread::kernel_stack()
     }
 
     /// # Safety

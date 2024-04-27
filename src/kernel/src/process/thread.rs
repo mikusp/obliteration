@@ -1,13 +1,17 @@
 use super::{CpuMask, CpuSet, VProc, NEXT_ID};
 use crate::errno::Errno;
 use crate::fs::VFile;
+use crate::info;
 use crate::signal::SignalSet;
 use crate::ucred::{Privilege, PrivilegeError, Ucred};
+use crate::vm::Protections;
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
+use libc::{MAP_ANON, MAP_PRIVATE};
 use llt::{OsThread, SpawnError};
 use macros::Errno;
 use std::num::NonZeroI32;
+use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use thiserror::Error;
@@ -28,6 +32,7 @@ pub struct VThread {
     cpuset: CpuSet,                  // td_cpuset
     name: Gutex<Option<String>>,     // td_name
     fpop: Gutex<Option<Arc<VFile>>>, // td_fpop
+    pub kernel_stack: Arc<KernelStack>,
 }
 
 impl VThread {
@@ -35,6 +40,7 @@ impl VThread {
         // TODO: Check how the PS4 actually allocate the thread ID.
         let gg = GutexGroup::new();
         let cred = proc.cred().clone();
+        let kernel_stack = KernelStack::new();
 
         Self {
             proc,
@@ -50,12 +56,17 @@ impl VThread {
             cpuset: CpuSet::new(CpuMask::default()), // TODO: Same here.
             name: gg.spawn(None),                    // TODO: Same here
             fpop: gg.spawn(None),
+            kernel_stack,
         }
     }
 
     /// Return [`None`] if the calling thread is not a PS4 thread.
     pub fn current() -> Option<Local<'static, Arc<Self>>> {
         VTHREAD.get()
+    }
+
+    pub fn kernel_stack() -> usize {
+        STACK.get().unwrap().top()
     }
 
     pub fn proc(&self) -> &Arc<VProc> {
@@ -130,6 +141,13 @@ impl VThread {
         let proc = self.proc.clone();
         let td = Arc::new(self);
         let running = Running(td.clone());
+        let kernel_stack = Stacking(td.kernel_stack.clone());
+        info!(
+            "kernel_stack: {:#x}-{:#x}, top {:#x}",
+            kernel_stack.0.addr,
+            kernel_stack.0.addr + kernel_stack.0.size,
+            kernel_stack.0.top()
+        );
         // Lock the list before spawn the thread to prevent race condition if the new thread run
         // too fast and found out they is not in our list.
         let mut threads = proc.threads_mut();
@@ -138,6 +156,7 @@ impl VThread {
             // reason is because this thread will be exited without returning from the routine. That
             // mean all variables on the stack will not get dropped.
             assert!(VTHREAD.set(running.0.clone()).is_none());
+            assert!(STACK.set(kernel_stack.0.clone()).is_none());
             routine();
         })?;
 
@@ -177,6 +196,56 @@ bitflags! {
     }
 }
 
+#[derive(Debug)]
+struct KernelStack {
+    addr: usize,
+    size: usize,
+}
+
+impl KernelStack {
+    pub fn new() -> Arc<Self> {
+        let size = 0x800000;
+        let addr = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                MAP_ANON | MAP_PRIVATE,
+                -1,
+                0,
+            )
+        };
+
+        if addr == libc::MAP_FAILED {
+            panic!("failed to allocate stack");
+        }
+
+        unsafe {
+            libc::mprotect(addr, 0x4000, libc::PROT_NONE);
+            libc::mprotect(addr.byte_add(0x7fc000), 0x4000, libc::PROT_NONE);
+        }
+
+        Arc::new(Self {
+            addr: addr as usize,
+            size,
+        })
+    }
+
+    pub fn top(self: &Arc<Self>) -> usize {
+        self.addr as usize + self.size - 0x4000
+    }
+}
+
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.addr as _, self.size);
+        }
+    }
+}
+
+struct Stacking(Arc<KernelStack>);
+
 // An object for removing the thread from the list when dropped.
 struct Running(Arc<VThread>);
 
@@ -190,6 +259,7 @@ impl Drop for Running {
 }
 
 static VTHREAD: Tls<Arc<VThread>> = Tls::new();
+static STACK: Tls<Arc<KernelStack>> = Tls::new();
 
 #[derive(Debug, Error, Errno)]
 pub enum FileAllocError {}
