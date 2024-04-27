@@ -1,8 +1,8 @@
 use crate::errno::EINVAL;
 use crate::idt::Entry;
-use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::{info, warn};
 use std::sync::Arc;
 
 pub struct NamedObjManager {}
@@ -12,8 +12,12 @@ impl NamedObjManager {
         let namedobj = Arc::new(Self {});
 
         sys.register(557, &namedobj, Self::sys_namedobj_create);
+        sys.register(558, &namedobj, |_, _, _| {
+            warn!("stubbed sys_namedobj_delete");
+            Ok(0.into())
+        });
         sys.register(601, &namedobj, |_, _, _| {
-            info!("faked mdbg_service");
+            warn!("stubbed sys_mdbg_service");
             Ok(0.into())
         });
 
