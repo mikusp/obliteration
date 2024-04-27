@@ -421,11 +421,11 @@ impl Fs {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
             todo!("open({path}) with flags & O_TRUNC");
-        } else {
+        } else if flags.intersects(OpenFlags::O_CREAT) {
             let mode: i64 = i.args[2].try_into().unwrap();
-            if mode != 0 {
-                todo!("open({path}, {flags}) with mode = {mode:#x}");
-            }
+            todo!("open({path}, {flags}) with mode = {mode:#x}");
+        } else if flags.bits() > OpenFlags::UNK2.bits() {
+            todo!("sys_open: unknown flags {}", flags);
         }
 
         info!("Opening {path} with flags = {flags}.");
