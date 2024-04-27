@@ -130,7 +130,13 @@ impl DeviceDriver for Dmem {
                 let phys_addr = td
                     .proc()
                     .vm()
-                    .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
+                    .allocate_dmem(
+                        alloc.start_or_phys_out,
+                        alloc.end,
+                        alloc.len,
+                        alloc.mem_type.try_into().unwrap(),
+                        alloc.align,
+                    )
                     .map_err(|_| DmemIoctlErr::InvalidParameters)?;
 
                 alloc.start_or_phys_out = phys_addr.0
@@ -139,7 +145,13 @@ impl DeviceDriver for Dmem {
                 let phys_addr = td
                     .proc()
                     .vm()
-                    .allocate_dmem(alloc.start_or_phys_out, alloc.end, alloc.len, alloc.align)
+                    .allocate_dmem(
+                        alloc.start_or_phys_out,
+                        alloc.end,
+                        alloc.len,
+                        alloc.mem_type.try_into().unwrap(),
+                        alloc.align,
+                    )
                     .map_err(|_| DmemIoctlErr::InvalidParameters)?;
 
                 alloc.start_or_phys_out = phys_addr.0

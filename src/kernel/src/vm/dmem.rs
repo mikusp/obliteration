@@ -4,6 +4,7 @@ use crate::warn;
 
 use super::storage::Storage;
 use super::Addr;
+use super::MemoryType;
 use super::Protections;
 
 #[derive(Debug, PartialOrd, PartialEq, Ord, Eq, Clone, Copy)]
@@ -13,6 +14,13 @@ pub struct PhysAddr(pub usize);
 pub(super) struct DmemAllocation {
     pub phys_addr: PhysAddr,
     pub len: usize,
+    pub mem_type: MemoryType,
+}
+
+impl DmemAllocation {
+    pub fn end(&self) -> PhysAddr {
+        PhysAddr(self.phys_addr.0 + self.len)
+    }
 }
 
 impl Ord for DmemAllocation {

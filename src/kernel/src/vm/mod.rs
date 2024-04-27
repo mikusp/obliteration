@@ -156,6 +156,7 @@ impl Vm {
         search_start: usize,
         search_end: usize,
         len: usize,
+        mem_type: MemoryType,
         align: usize,
     ) -> Result<PhysAddr, SysErr> {
         let mut allocations = self.dmem_allocations.write().unwrap();
@@ -167,7 +168,11 @@ impl Vm {
 
         if allocations.is_empty() {
             let phys_addr = PhysAddr(search_start);
-            let alloc = DmemAllocation { phys_addr, len };
+            let alloc = DmemAllocation {
+                phys_addr,
+                len,
+                mem_type,
+            };
 
             allocations.insert(phys_addr, alloc);
 
@@ -185,20 +190,18 @@ impl Vm {
                 });
 
             loop {
-                // info!(
-                //     "allocate: candidate {:#x}, len {:#x}, alloc_start {:#x}",
-                //     candidate, len, allocation.phys_addr.0
-                // );
-
                 if candidate + len < allocation.phys_addr.0
                     || (candidate >= (allocation.phys_addr.0 + allocation.len)
                         && (candidate + len) < search_end)
                 {
                     let phys_addr = PhysAddr(candidate);
-                    let alloc = DmemAllocation { phys_addr, len };
+                    let alloc = DmemAllocation {
+                        phys_addr,
+                        len,
+                        mem_type,
+                    };
 
                     allocations.insert(phys_addr, alloc);
-                    // allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
 
                     return Ok(phys_addr);
                 }
@@ -218,7 +221,7 @@ impl Vm {
 
             // if aligned_candidate + len < search_end {
             //     let phys_addr = PhysAddr(aligned_candidate);
-            //     let alloc = DmemAllocation { phys_addr, len };
+            //     let alloc = DmemAllocation { phys_addr, len, mem_type };
 
             //     allocations.push(alloc);
 
@@ -247,10 +250,13 @@ impl Vm {
             loop {
                 if candidate + len < allocation.phys_addr.0 {
                     let phys_addr = PhysAddr(candidate);
-                    let alloc = DmemAllocation { phys_addr, len };
+                    let alloc = DmemAllocation {
+                        phys_addr,
+                        len,
+                        mem_type,
+                    };
 
                     allocations.insert(phys_addr, alloc);
-                    // allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
 
                     return Ok(phys_addr);
                 }
@@ -282,10 +288,14 @@ impl Vm {
 
                 if candidate < j.phys_addr.0 && (candidate + len) < j.phys_addr.0 {
                     let phys_addr = PhysAddr(candidate);
-                    let alloc = DmemAllocation { phys_addr, len };
+                    let alloc = DmemAllocation {
+                        phys_addr,
+                        len,
+                        mem_type,
+                    };
 
                     allocations.insert(phys_addr, alloc);
-                    // allocations.sort_by(|a, b| a.phys_addr.partial_cmp(&b.phys_addr).unwrap());
+                    info!("found space at {:#x}", phys_addr.0);
 
                     Err(phys_addr)
                 } else {
@@ -297,20 +307,36 @@ impl Vm {
                 return Ok(phys_addr);
             }
 
+            info!("no space between mappings, check at the end");
             // no space in between existing mappings, check after all
             let entry = allocations.last_entry().unwrap();
             let last_allocation = entry.get();
 
-            let mut candidate = last_allocation.phys_addr.0
-                + (last_allocation.phys_addr.0 as *const c_void).align_offset(if align == 0 {
-                    0x4000
-                } else {
-                    align
-                });
+            info!(
+                "last allocation addr {:#x}, effective end {:#x}",
+                last_allocation.phys_addr.0,
+                last_allocation.end().0
+            );
 
-            if candidate + len < last_allocation.phys_addr.0 {
+            let candidate = {
+                let candidate = last_allocation.end();
+
+                // align
+                candidate.0
+                    + (candidate.0 as *const c_void).align_offset(if align == 0 {
+                        0x4000
+                    } else {
+                        align
+                    })
+            };
+
+            if candidate + len < search_end && candidate + len < self.dmem.size {
                 let phys_addr = PhysAddr(candidate);
-                let alloc = DmemAllocation { phys_addr, len };
+                let alloc = DmemAllocation {
+                    phys_addr,
+                    len,
+                    mem_type,
+                };
 
                 allocations.insert(phys_addr, alloc);
 
@@ -2232,7 +2258,7 @@ impl TryFrom<i32> for BatchMapOp {
 }
 
 #[repr(i32)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq)]
 pub enum MemoryType {
     WbOnion = 0,
     WcGarlic = 3,
@@ -2265,6 +2291,21 @@ impl TryFrom<u8> for MemoryType {
             10 => Ok(MemoryType::WbGarlic),
             i if i == !0 => Ok(MemoryType::Any),
             i if i < 10 => Ok(MemoryType::Unk(i)),
+            _ => Err(SysErr::Raw(EINVAL)),
+        }
+    }
+}
+
+impl TryFrom<i32> for MemoryType {
+    type Error = SysErr;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(MemoryType::WbOnion),
+            3 => Ok(MemoryType::WcGarlic),
+            10 => Ok(MemoryType::WbGarlic),
+            i if i == !0 => Ok(MemoryType::Any),
+            i if i < 10 => Ok(MemoryType::Unk(i as u8)),
             _ => Err(SysErr::Raw(EINVAL)),
         }
     }

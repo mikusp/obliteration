@@ -5,7 +5,7 @@ use crate::fs::{DefaultFileBackendError, FileBackend, IoCmd, PollEvents, Stat, V
 use crate::info;
 use crate::process::VThread;
 use crate::syscalls::SysErr;
-use crate::vm::PhysAddr;
+use crate::vm::{MemoryType, PhysAddr};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -54,16 +54,15 @@ impl BlockPool {
             return Err(SysErr::Raw(ENOMEM));
         } else {
             // adjust search and start according to data in the vfile
-            td.unwrap()
-                .proc()
-                .vm()
-                .allocate_dmem(
-                    search_start,
-                    search_end,
-                    len as usize,
-                    1 << (unk_align & 0x3f),
-                )
-                .map(|addr| Some(addr))
+            let addr = td.unwrap().proc().vm().allocate_dmem(
+                search_start,
+                search_end,
+                len as usize,
+                MemoryType::WcGarlic,
+                1 << (unk_align & 0x3f),
+            )?;
+
+            return Ok(Some(addr));
             // do more bookkeeping from blockpool_ioctl
         }
     }
