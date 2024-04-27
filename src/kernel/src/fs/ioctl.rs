@@ -96,6 +96,9 @@ commands! {
         /// An unkown bnet command, called from libSceNet
         BNETUNK(&Unknown36) = 0x802450c9,
 
+        /// dce commands
+        DCEUNK1(&mut Unknown48) = 0xC0308203,
+
         /// Get media size in bytes.
         DIOCGMEDIASIZE(&mut i64) = 0x40086418,
 
