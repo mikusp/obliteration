@@ -9,6 +9,7 @@ use self::storage::Storage;
 use crate::dev::DmemContainer;
 use crate::dev::DmemIoctlErr;
 use crate::dev::DmemQueryInfo;
+use crate::dmem::BlockPool;
 use crate::errno::EACCES;
 use crate::errno::EAGAIN;
 use crate::errno::{Errno, EINVAL, ENOMEM, EOPNOTSUPP};
@@ -27,7 +28,10 @@ use bitflags::bitflags;
 use bitflags::Flags;
 use gmtx::Gutex;
 use gmtx::GutexGroup;
+use humansize::format_size;
+use humansize::DECIMAL;
 use macros::Errno;
+use std::any::Any;
 use std::cmp::max;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -35,6 +39,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
 use std::io::Error;
 use std::iter::Map;
+use std::mem::size_of;
 use std::num::TryFromIntError;
 use std::os::raw::c_void;
 use std::ptr::null_mut;
@@ -65,6 +70,7 @@ pub enum Addr {
     PhysAddr(PhysAddr),
 }
 
+#[derive(Debug)]
 pub struct VmObject {}
 
 impl Vm {
@@ -99,7 +105,34 @@ impl Vm {
         };
 
         // Allocate main stack.
-        let stack_top = match mm.mmap(
+        // let stack_top = match mm.mmap(
+        //     0x7_F000_0000,
+        //     mm.stack.len() + Self::VIRTUAL_PAGE_SIZE,
+        //     mm.stack.prot(),
+        //     "main stack",
+        //     MappingFlags::MAP_ANON | MappingFlags::MAP_PRIVATE | MappingFlags::MAP_STACK,
+        //     -1,
+        //     0,
+        // ) {
+        //     Ok(v) => v.into_raw(),
+        //     Err(e) => return Err(MemoryManagerError::StackAllocationFailed(e)),
+        // };
+
+        // // Set the guard page to be non-accessible.
+        // if let Err(e) = mm.mprotect(
+        //     stack_top.wrapping_sub(mm.stack.len() + Self::VIRTUAL_PAGE_SIZE),
+        //     Self::VIRTUAL_PAGE_SIZE,
+        //     Protections::empty(),
+        // ) {
+        //     return Err(MemoryManagerError::GuardStackFailed(e));
+        // }
+
+        // mm.stack
+        //     .set_guard(stack_top.wrapping_sub(mm.stack.len() + Self::VIRTUAL_PAGE_SIZE));
+        // mm.stack
+        //     .set_stack(unsafe { stack_top.wrapping_sub(mm.stack.len()) });
+
+        let stack_bottom = match mm.mmap(
             0x7_F000_0000,
             mm.stack.len() + Self::VIRTUAL_PAGE_SIZE,
             mm.stack.prot(),
@@ -113,18 +146,12 @@ impl Vm {
         };
 
         // Set the guard page to be non-accessible.
-        if let Err(e) = mm.mprotect(
-            stack_top.wrapping_sub(mm.stack.len() + Self::VIRTUAL_PAGE_SIZE),
-            Self::VIRTUAL_PAGE_SIZE,
-            Protections::empty(),
-        ) {
+        if let Err(e) = mm.mprotect(stack_bottom, Self::VIRTUAL_PAGE_SIZE, Protections::empty()) {
             return Err(MemoryManagerError::GuardStackFailed(e));
         }
 
-        mm.stack
-            .set_guard(stack_top.wrapping_sub(mm.stack.len() + Self::VIRTUAL_PAGE_SIZE));
-        mm.stack
-            .set_stack(unsafe { stack_top.wrapping_sub(mm.stack.len()) });
+        mm.stack.set_guard(stack_bottom);
+        mm.stack.set_stack(unsafe { stack_bottom.byte_add(0x4000) });
 
         // Register syscall handlers.
         let mm = Arc::new(mm);
@@ -159,6 +186,18 @@ impl Vm {
         mem_type: MemoryType,
         align: usize,
     ) -> Result<PhysAddr, SysErr> {
+        info!(
+            "allocate_dmem({:#x} ({}), {:#x} ({}), {:#x} ({}), {:?}, {:#x} ({}))",
+            search_start,
+            format_size(search_start, DECIMAL),
+            search_end,
+            format_size(search_end, DECIMAL),
+            len,
+            format_size(len, DECIMAL),
+            mem_type,
+            align,
+            format_size(align, DECIMAL)
+        );
         let mut allocations = self.dmem_allocations.write().unwrap();
 
         info!(
@@ -352,9 +391,11 @@ impl Vm {
         addr: usize,
         len: usize,
         mem_type: MemoryType,
+        flags: MappingFlags,
         prot: Protections,
+        name: String,
         phys_addr: PhysAddr,
-    ) -> Result<usize, SysErr> {
+    ) -> Result<Mapping, SysErr> {
         info!(
             "Dmem::mmap({:#x}, {:#x}, {:?}, {}, {:?})",
             addr, len, mem_type, prot, phys_addr
@@ -363,19 +404,23 @@ impl Vm {
         /// make sure the area is allocated
         for i in self.dmem_allocations.read().unwrap().values().into_iter() {
             if phys_addr >= i.phys_addr && (phys_addr.0 + len) <= (i.phys_addr.0 + i.len) {
-                let addr = self.find_free_area(addr, len)?;
+                let free_addr = self.findspace(addr, len)?;
 
                 let virt_addr = self
                     .dmem
                     .native_dmem
-                    .map(addr, len, prot, phys_addr)
+                    .map(free_addr, len, prot, phys_addr)
                     .ok_or(SysErr::Raw(ENOMEM))?;
+
+                if flags.intersects(MappingFlags::MAP_FIXED) && virt_addr != addr {
+                    todo!("mmap_dmem with MAP_FIXED returned incorrect address");
+                }
 
                 let mapping = Mapping {
                     addr: virt_addr as _,
                     len,
                     prot,
-                    name: "".to_string(),
+                    name,
                     storage: Arc::new(*i),
                     locked: false,
                     mem_type: Some(mem_type),
@@ -383,9 +428,12 @@ impl Vm {
 
                 info!("Dmem::mmap(): {:?}", mapping);
 
-                self.mappings.write().unwrap().insert(virt_addr, mapping);
+                self.mappings
+                    .write()
+                    .unwrap()
+                    .insert(virt_addr, mapping.clone());
 
-                return Ok(virt_addr);
+                return Ok(mapping);
             }
         }
         error!("mmap_dmem failed, {:#x} is not allocated?", phys_addr.0);
@@ -485,9 +533,10 @@ impl Vm {
     ) -> Result<VPages<'_>, MmapError> {
         let name = name.into();
         info!(
-            "mmap({:#x}, {:#x}, {}, {}, {}, {}, {:#x})",
+            "mmap({:#x}, {:#x} ({}), {}, {}, {}, {}, {:#x})",
             addr,
             len,
+            format_size(len, DECIMAL),
             prot,
             name.clone(),
             flags,
@@ -519,7 +568,7 @@ impl Vm {
                 return Err(MmapError::NonNegativeFd);
             } else {
                 if Protections::from_bits_truncate(cpu_write_prot as u32)
-                    .intersection(prot)
+                    .union(prot)
                     .bits()
                     & 0x3
                     != 0x3
@@ -560,10 +609,60 @@ impl Vm {
                 todo!("mmap with addr = 0x880000000");
             }
         } else {
-            addr = addr - offset & 0x3fff;
+            addr = addr - (offset & 0x3fff);
             if addr & 0x3fff != 0 || !addr < len {
                 return Err(MmapError::InvalidAddr);
             }
+
+            // check if requesting guard page
+            // if flags.contains(MappingFlags::MAP_VOID)
+            //     && len == 0x4000
+            //     && offset == 0
+            //     && fd == -1
+            //     && prot.is_empty()
+            // {
+            //     // looks like it, confirm that it really is allocated
+            //     let mut mappings = self.mappings.write().unwrap();
+            //     info!("foo, {:?}", mappings);
+            //     match mappings.entry(addr) {
+            //         Entry::Occupied(e) => {
+            //             info!("returning stack guard for {:#x}", addr);
+            //             let (addr, mapping) = e.remove_entry();
+            //             let guard_mapping = Mapping {
+            //                 addr: mapping.addr,
+            //                 len: 0x4000,
+            //                 prot: Protections::empty(),
+            //                 name: "stack guard".to_string(),
+            //                 storage: mapping.storage.clone(),
+            //                 locked: mapping.locked,
+            //                 mem_type: mapping.mem_type.clone(),
+            //             };
+
+            //             let stack_mapping = Mapping {
+            //                 addr: unsafe { mapping.addr.add(0x4000) },
+            //                 len: mapping.len - 0x4000,
+            //                 prot: mapping.prot,
+            //                 name: mapping.name,
+            //                 storage: mapping.storage,
+            //                 locked: mapping.locked,
+            //                 mem_type: mapping.mem_type.clone(),
+            //             };
+
+            //             guard_mapping
+            //                 .storage
+            //                 .protect(addr as _, len, prot)
+            //                 .map_err(|_| MmapError::InvalidFlags(666))?;
+            //             mappings.insert(addr, guard_mapping);
+            //             mappings.insert(addr + 0x4000, stack_mapping);
+            //             drop(mappings);
+
+            //             self.validate_mappings();
+
+            //             return Ok(VPages::new(self, addr as _, len));
+            //         }
+            //         Entry::Vacant(_) => {}
+            //     }
+            // }
         }
 
         let mut file_handle = None;
@@ -593,7 +692,37 @@ impl Vm {
                 file_handle = Some(file.clone());
 
                 match *file.ty() {
-                    _ => warn!("ignored vfile mmapping"),
+                    VFileType::Blockpool => {
+                        max_prot = Protections::RW;
+                    }
+                    VFileType::SharedMemory => {
+                        flags = MappingFlags::from_bits_truncate(file.flags().bits());
+                        let restricting_prot = if !flags.intersects(MappingFlags::MAP_SHARED) {
+                            Protections::from_bits_truncate(
+                                file.flags().intersects(VFileFlags::READ) as u32,
+                            )
+                        } else {
+                            Protections::CPU_READ | Protections::GPU_READ
+                        };
+                        max_prot = if !file.flags().intersects(VFileFlags::WRITE) {
+                            restricting_prot
+                        } else {
+                            restricting_prot
+                                .intersection(Protections::CPU_WRITE | Protections::GPU_WRITE)
+                        };
+                    }
+                    VFileType::Vnode => {
+                        let name = file.backend().name().unwrap();
+                        if name == "gc".to_string()
+                            || name == "dmem1".to_string()
+                            || name == "hmd_dist".to_string()
+                        {
+                            //ignore
+                        } else {
+                            todo!("mmap file {}", name);
+                        }
+                    }
+                    ty => warn!("ignored vfile mmapping: {:?}", ty),
                 }
                 td.set_fpop(Some(file.clone()));
             }
@@ -815,6 +944,7 @@ impl Vm {
     ) -> Result<VPages<'_>, MmapError> {
         // TODO: Check what is PS4 doing here.
         use std::collections::btree_map::Entry;
+        info!("map addr {:#x}", addr);
 
         // Do allocation.
         let addr = (addr + 0x3fff) & 0xffffffffffffc000;
@@ -834,9 +964,9 @@ impl Vm {
             (true, addr + 0x3fff & 0xffffffffffffc000)
         };
 
-        let vm_object = None;
+        // let vm_object = None;
 
-        if let Some(ref vfile) = file_handle {
+        let vm_object = if let Some(ref vfile) = file_handle {
             match &vfile.ty() {
                 VFileType::Blockpool => {
                     if file_offset != 0 {
@@ -863,9 +993,13 @@ impl Vm {
                         return Err(MmapError::InvalidFlags(3));
                     }
 
-                    // let area = self.pager_allocate(vfile, size, Protections::RW, flags, 0);
+                    let bp: &BlockPool = (vfile.backend().as_ref() as &dyn Any)
+                        .downcast_ref()
+                        .expect("blockpool downcast");
 
-                    // todo!()
+                    let obj = self.pager_allocate(vfile, size, Protections::RW, flags, 0);
+
+                    obj
                 }
                 VFileType::Device => {
                     let b = vfile.backend();
@@ -873,9 +1007,13 @@ impl Vm {
                         // nothing for now
                     } else if b.name() == Some("dmem1".to_string()) {
                         // nothing
+                    } else if b.name() == Some("hmd_dist".to_string()) {
+                        // nothing
                     } else {
                         todo!("{:?}", b.name())
                     }
+
+                    None
                 }
                 VFileType::Vnode => {
                     let b = vfile.backend();
@@ -883,9 +1021,13 @@ impl Vm {
                         // nothing for now
                     } else if b.name() == Some("dmem1".to_string()) {
                         // nothing
+                    } else if b.name() == Some("hmd_dist".to_string()) {
+                        // nothing
                     } else {
                         todo!("{:?}", b.name())
                     }
+
+                    None
                 }
                 VFileType::SharedMemory => {
                     let max_prot = vfile.flags();
@@ -898,13 +1040,16 @@ impl Vm {
                         return Err(MmapError::ConflictingProtections);
                     }
 
-                    let mapping = SharedMemoryManager::mmap(vfile.clone(), len, file_offset)?;
+                    let obj = SharedMemoryManager::mmap(vfile.clone(), len, file_offset)?;
 
-                    return Ok(VPages::new(self, mapping as _, len));
+                    // return Ok(VPages::new(self, mapping as _, len));
+                    Some(obj)
                 }
                 _ => todo!(),
             }
-        }
+        } else {
+            None
+        };
 
         let mut unk = 0;
         if !flags.intersects(MappingFlags::MAP_ANON) {
@@ -971,7 +1116,7 @@ impl Vm {
                     };
 
                     self.map_find(
-                        vm_object,
+                        file_handle.clone(),
                         file_offset,
                         addr,
                         len,
@@ -984,7 +1129,7 @@ impl Vm {
                     )
                 } else {
                     self.map_fixed(
-                        vm_object,
+                        file_handle.clone(),
                         file_offset,
                         addr,
                         len,
@@ -992,6 +1137,7 @@ impl Vm {
                         max_prot,
                         cow,
                         flags,
+                        name,
                     )
                 }
             } else {
@@ -1000,17 +1146,26 @@ impl Vm {
 
             let _ = self.validate_mappings();
 
-            if let Some(vfile) = file_handle {
+            if let Some(ref vfile) = file_handle {
                 if *vfile.ty() == VFileType::Blockpool {
-                    todo!()
+                    let bp: &BlockPool = (vfile.backend().as_ref() as &dyn Any)
+                        .downcast_ref()
+                        .expect("blockpool");
+
+                    let budget = if addr >> 0x1c < 0xff && addr + size > 0x7_F000_0000 {
+                        0
+                    } else {
+                        VThread::current().unwrap().proc().budget_id()
+                    };
+                    *bp.budget.write() = budget;
                 }
             }
 
-            if flags.intersects(MappingFlags::MAP_STACK) {
-                return Ok(VPages::new(self, mapping.end(), mapping.len));
-            } else {
-                return Ok(VPages::new(self, mapping.addr, mapping.len));
-            }
+            // if flags.intersects(MappingFlags::MAP_STACK) {
+            //     return Ok(VPages::new(self, mapping.end(), mapping.len));
+            // } else {
+            return Ok(VPages::new(self, mapping.addr, mapping.len));
+            // }
 
             // some logic at the end
             // if !flags.intersects(MappingFlags::MAP_SHARED) ||
@@ -1021,7 +1176,7 @@ impl Vm {
 
     fn map_find(
         &self,
-        vm_object: Option<()>,
+        file: Option<Arc<VFile>>,
         file_offset: i64,
         mut start_addr: usize,
         len: usize,
@@ -1032,6 +1187,7 @@ impl Vm {
         flags: MappingFlags,
         name: String,
     ) -> Result<Mapping, MmapError> {
+        info!("map_find prot {}", prot);
         let flag_unk2_zero = !flags.intersects(MappingFlags::UNK2);
         let start = if flag_unk2_zero || find_space != 1 {
             start_addr
@@ -1093,13 +1249,49 @@ impl Vm {
                 || (VThread::current().unwrap().proc().sdk_ver().unwrap() < 0x3000000)
             {
                 if find_space == 5 || find_space == 2 {
-                    todo!()
+                    warn!("ignoring pmap_align_superpage")
                 } else if find_space > 0xd {
                     start_addr = start_addr + !uvar6 & uvar6;
                 }
 
                 let mappings = self.mappings.write().unwrap();
-                let mapping = self.insert_mapping(mappings, start_addr, len, prot, name);
+                let mapping = if let Some(ref vfile) = file {
+                    match *vfile.ty() {
+                        VFileType::SharedMemory => {
+                            let shm: &SharedMemory = (vfile.backend().as_ref() as &dyn Any)
+                                .downcast_ref()
+                                .expect("shm");
+                            let mem =
+                                Memory::new_shared(start_addr, len, prot, shm.fd(), file_offset)
+                                    .map_err(|_| MmapError::NoMem(0x232))?;
+                            let mapping = Mapping {
+                                addr: mem.ptr(),
+                                len,
+                                prot,
+                                name,
+                                storage: Arc::new(mem),
+                                locked: false,
+                                mem_type: None,
+                            };
+
+                            self.insert_mapping(mappings, mapping)
+                        }
+                        VFileType::Vnode => {
+                            let name = vfile.backend().name().unwrap();
+                            if name == "gc".to_string()
+                                || name == "dmem1".to_string()
+                                || name == "hmd_dist".to_string()
+                            {
+                                self.alloc_and_insert_mapping(mappings, start_addr, len, prot, name)
+                            } else {
+                                todo!("vnode {}", name)
+                            }
+                        }
+                        ty => todo!("map_find: {:?}", ty),
+                    }
+                } else {
+                    self.alloc_and_insert_mapping(mappings, start_addr, len, prot, name)
+                };
 
                 if find_space < 0xf && find_space != 2 {
                     return mapping;
@@ -1128,10 +1320,18 @@ impl Vm {
                 0x2_0000_0000
             } else if a >= 0x2_0000_0000 && a < 0x7_0000_0000 {
                 0x7_0000_0000
+            } else if a >= 0x7_E000_0000 && a < 0x7_F000_0000 {
+                0x7_F000_0000
             } else if a >= 0xF_E000_0000 && a < 0xF_F000_0000 {
                 0xF_F000_0000
+            } else if a >= 0xF_F000_0000 && a < 0xF_F004_0000 {
+                0xF_F004_0000
+            } else if a >= 0x10_0000_0000 && a < 0xFC_0000_0000 {
+                0xFC_0000_0000
+            } else if a >= 0x5000_0000_0000 && a < 0x1_0000_0000_0000 {
+                0x1_0000_0000_0000
             } else {
-                todo!("area_end {:#x}", a);
+                todo!("area_end {:#x}", a)
             }
         };
 
@@ -1163,7 +1363,7 @@ impl Vm {
 
     fn map_fixed(
         &self,
-        vm_object: Option<()>,
+        file: Option<Arc<VFile>>,
         file_offset: i64,
         addr: usize,
         len: usize,
@@ -1171,12 +1371,95 @@ impl Vm {
         max_prot: Protections,
         cow: i32,
         flags: MappingFlags,
+        name: String,
     ) -> Result<Mapping, MmapError> {
         info!(
             "map_fixed({:?}, {:#x}, {:#x}, {:#x}, {}. {}, {:#x}, {})",
-            vm_object, file_offset, addr, len, prot, max_prot, cow, flags
+            file, file_offset, addr, len, prot, max_prot, cow, flags
         );
-        todo!()
+
+        let size = if cow & 0x40000 == 0 {
+            len
+        } else {
+            len + 0x4000
+        };
+
+        let end = addr + size;
+
+        if addr >> 47 == 0 {
+            if (!flags.intersects(MappingFlags::MAP_SANITIZER)
+                && ((0x3e < addr >> 34) || 0xfc00000000 < end))
+                && (VThread::current().unwrap().proc().sdk_ver().unwrap() > 0x2ffffff)
+            {
+                return Err(MmapError::InvalidAddr);
+            }
+        }
+
+        if !flags.intersects(MappingFlags::MAP_NO_OVERWRITE) {
+            let ret = self.findspace(addr, len);
+
+            match ret {
+                Err(_) => todo!(),
+                Ok(v) if v == addr => {} // the area is free, no need to worry about unmapping
+                Ok(_) => {
+                    if len == 0x4000 && prot.is_empty() && flags.intersects(MappingFlags::MAP_VOID)
+                    {
+                        let _ = self.mprotect(addr as _, len, prot);
+                        //split the mapping
+                        let mappings = self.mappings.write().unwrap();
+
+                        return Ok(mappings.get(&addr).unwrap().clone());
+                    } else {
+                        todo!()
+                    }
+                }
+            }
+        }
+        let mappings = self.mappings.write().unwrap();
+
+        if let Some(ref vfile) = file {
+            match *vfile.ty() {
+                VFileType::Blockpool => {
+                    // let dmem_allocations = self.dmem_allocations.read().unwrap();
+                    let bp: &BlockPool = (vfile.backend().as_ref() as &dyn Any)
+                        .downcast_ref()
+                        .expect("blockpool");
+
+                    // info!("dmem allocs: {:?}", dmem_allocations);
+                    info!("blockpool: {:?}", bp);
+
+                    let len_in_blocks = len >> 0x10;
+                    let afb = bp.available_flushed_blocks.read();
+                    let mapping_len = if len_in_blocks > *afb {
+                        *afb << 0x10
+                    } else {
+                        len
+                    };
+
+                    drop(mappings);
+                    let mapping = self
+                        .mmap_dmem(
+                            addr,
+                            mapping_len,
+                            MemoryType::WcGarlic,
+                            flags,
+                            prot,
+                            "blockpool".to_string(),
+                            bp.phys_addr.read().unwrap(),
+                        )
+                        .map_err(|_| MmapError::InvalidAddr)?;
+
+                    if mapping.addr as usize != addr {
+                        todo!("map_fixed blockpool: different address");
+                    }
+
+                    return Ok(mapping);
+                }
+                ty => todo!("map_fixed file {:?}", ty),
+            }
+        } else {
+            self.alloc_and_insert_mapping(mappings, addr, len, prot, name)
+        }
     }
 
     fn map_stack(
@@ -1205,9 +1488,14 @@ impl Vm {
                     return Err(MmapError::NoMem(len));
                 }
 
-                let potential_conflicts = mappings.range(start..end);
+                let potential_conflicts = mappings.range(0x7_E000_0000..0x7_F000_0000);
 
-                for (_entry_addr, mapping) in potential_conflicts {
+                for (_entry_addr, mapping) in potential_conflicts.rev() {
+                    info!(
+                        "potential conflict for stack: {:#x}-{:#x}",
+                        mapping.addr as usize,
+                        mapping.end() as usize
+                    );
                     if (start >= mapping.addr as usize && start < mapping.end() as usize)
                         || (end >= mapping.addr as usize && end < mapping.end() as usize)
                     {
@@ -1218,7 +1506,7 @@ impl Vm {
                     }
                 }
 
-                let m = self.insert_mapping(mappings, start, len, prot, name)?;
+                let m = self.alloc_and_insert_mapping(mappings, start, len, prot, name)?;
 
                 return Ok(m);
             }
@@ -1227,7 +1515,7 @@ impl Vm {
         }
     }
 
-    fn insert_mapping(
+    fn alloc_and_insert_mapping(
         &self,
         mut locked_mappings: RwLockWriteGuard<'_, BTreeMap<usize, Mapping>>,
         addr: usize,
@@ -1239,7 +1527,6 @@ impl Vm {
             Ok(v) => v,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::OutOfMemory {
-                    info!("1274");
                     return Err(MmapError::NoMem(len));
                 } else {
                     // We should not hit other error except for out of memory.
@@ -1248,6 +1535,14 @@ impl Vm {
             }
         };
 
+        self.insert_mapping(locked_mappings, alloc)
+    }
+
+    fn insert_mapping(
+        &self,
+        mut locked_mappings: RwLockWriteGuard<'_, BTreeMap<usize, Mapping>>,
+        alloc: Mapping,
+    ) -> Result<Mapping, MmapError> {
         // Store allocation info.
         let mapping = match locked_mappings.entry(alloc.addr as usize) {
             Entry::Occupied(e) => {
@@ -1300,6 +1595,35 @@ impl Vm {
         }
 
         0
+    }
+
+    fn virtual_query(
+        &self,
+        addr: usize,
+        flags: VirtualQueryFlags,
+    ) -> Result<VirtualQueryInfo, SysErr> {
+        let mappings = self.mappings.read().unwrap();
+
+        for (_entry_addr, m) in mappings.range(addr..).into_iter() {
+            if m.addr as usize == addr || flags.intersects(VirtualQueryFlags::FIND_NEXT) {
+                let mem_props = MemoryProps::FLEXIBLE;
+                let mut name: [u8; 32] = [0; 32];
+                name[..m.name.len()].copy_from_slice(m.name.as_bytes());
+                let info = VirtualQueryInfo {
+                    start: m.addr as usize,
+                    end: m.end() as usize,
+                    off: PhysAddr(0),
+                    prot: m.prot,
+                    mem_type: m.mem_type.clone().unwrap_or(MemoryType::Any),
+                    mem_props: mem_props,
+                    name,
+                };
+
+                return Ok(info);
+            }
+        }
+
+        return Err(SysErr::Raw(EACCES));
     }
 
     fn update<F, U>(
@@ -1473,7 +1797,7 @@ impl Vm {
         prot: Protections,
         flags: MappingFlags,
         unk: usize,
-    ) -> Option<usize> {
+    ) -> Option<VmObject> {
         info!(
             "pager_allocate({:?}, {:#x}, {}, {})",
             handle, size, prot, unk
@@ -1536,7 +1860,7 @@ impl Vm {
                         rv = !(flags.intersects(MappingFlags::MAP_PREFAULT_READ)) as u8 * 8 + 8;
                     }
 
-                    todo!()
+                    return Some(_o);
                 } else {
                     return None;
                 }
@@ -1687,13 +2011,23 @@ impl Vm {
                 addr
             );
         } else {
-            info!(
-                "{:#x}:{:p} is mapped as {} with {}.",
-                pages.addr(),
-                pages.end(),
-                prot,
-                flags,
-            );
+            if flags.intersects(MappingFlags::MAP_STACK) {
+                info!(
+                    "{:#x}:{:#x} is mapped as {} with {}.",
+                    pages.addr() - len,
+                    pages.end() as usize - len,
+                    prot,
+                    flags,
+                );
+            } else {
+                info!(
+                    "{:#x}:{:p} is mapped as {} with {}.",
+                    pages.addr(),
+                    pages.end(),
+                    prot,
+                    flags,
+                );
+            }
         }
 
         Ok(pages.into_raw().into())
@@ -1784,9 +2118,27 @@ impl Vm {
         result.map(|_| SysOut::ZERO)
     }
 
-    fn sys_virtual_query(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-        info!("sys_virtual_query");
-        Ok(SysOut::ZERO)
+    fn sys_virtual_query(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let addr: usize = i.args[0].into();
+        let flags: VirtualQueryFlags = i.args[1].try_into().unwrap();
+        let info: usize = i.args[2].into();
+        let info_size: usize = i.args[3].into();
+
+        info!(
+            "sys_virtual_query({:#x}, {:#x}, {:#x}, {:#x})",
+            addr, flags, info, info_size
+        );
+
+        let out = td.proc().vm().virtual_query(addr, flags)?;
+
+        if info_size == size_of::<VirtualQueryInfo>() && info != 0 {
+            unsafe {
+                *(info as *mut VirtualQueryInfo) = out;
+            }
+            return Ok(SysOut::ZERO);
+        } else {
+            return Err(SysErr::Raw(EINVAL));
+        }
     }
 
     fn sys_mname(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -1880,8 +2232,16 @@ impl Vm {
 
         td.proc()
             .vm()
-            .mmap_dmem(start_addr, len, mem_type, prot, PhysAddr(start_phys_addr))
-            .map(|x| x.into())
+            .mmap_dmem(
+                start_addr,
+                len,
+                mem_type,
+                flags,
+                prot,
+                String::new(),
+                PhysAddr(start_phys_addr),
+            )
+            .map(|x| x.addr.into())
     }
 
     pub fn dmem_query(
@@ -2122,6 +2482,11 @@ bitflags! {
         const MAP_SANITIZER = 0x00200000;
         const MAP_NO_COALESCE = 0x00400000;
         const MAP_WRITABLE_WB_GARLIC = 0x00800000;
+        const UNK4 = 0x01000000;
+        const UNK7 = 0x02000000;
+        const UNK5 = 0x04000000;
+        const UNK8 = 0x08000000;
+        const UNK6 = 0x10000000;
     }
 }
 
@@ -2138,6 +2503,55 @@ impl Display for MappingFlags {
         self.0.fmt(f)
     }
 }
+
+bitflags! {
+    /// Flags for [`MemoryManager::virtual_query()`].
+    #[repr(transparent)]
+    #[derive(Clone, Copy)]
+    pub struct VirtualQueryFlags: u32 {
+        const FIND_NEXT = 0x00000001;
+    }
+}
+
+bitflags! {
+    /// Flags for [`VirtualQueryInfo`].
+    #[repr(transparent)]
+    #[derive(Clone, Copy)]
+    pub struct MemoryProps: u32 {
+        const FLEXIBLE = 0x00000001;
+        const DIRECT = 0x00000002;
+        const STACK = 0x00000004;
+        const POOLED = 0x00000008;
+        const COMMITED = 0x00000010;
+    }
+}
+
+impl TryFrom<SysArg> for VirtualQueryFlags {
+    type Error = TryFromIntError;
+
+    fn try_from(v: SysArg) -> Result<Self, Self::Error> {
+        Ok(Self::from_bits_retain(v.get().try_into()?))
+    }
+}
+
+impl Display for VirtualQueryFlags {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[repr(C)]
+pub struct VirtualQueryInfo {
+    start: usize,
+    end: usize,
+    off: PhysAddr,
+    prot: Protections,
+    mem_type: MemoryType,
+    mem_props: MemoryProps,
+    name: [u8; 32],
+}
+
+// const _: () = assert!(size_of::<VirtualQueryFlags>() == 0x48);
 
 /// Represents an error when [`MemoryManager`] is failed to initialize.
 #[derive(Debug, Error)]

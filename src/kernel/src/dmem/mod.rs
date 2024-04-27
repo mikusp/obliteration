@@ -10,6 +10,7 @@ use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Gid, Uid};
 use crate::vm::{MemoryType, Protections};
+use gmtx::GutexGroup;
 use std::ops::Index;
 use std::sync::Arc;
 use thiserror::Error;
@@ -149,13 +150,16 @@ impl DmemManager {
         let addr = self.get_addr(dev, start);
 
         //todo: manage budgets?
-
+        let gg = GutexGroup::new();
         let blockpool = BlockPool {
             dmem_container,
             ptype: td.proc().budget_ptype(),
             start,
             end,
             addr,
+            available_flushed_blocks: gg.spawn(0),
+            phys_addr: gg.spawn(None),
+            budget: gg.spawn(0),
         };
 
         let file = VFile::new(

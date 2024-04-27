@@ -26,20 +26,57 @@ unsafe impl Send for Memory {}
 impl Memory {
     #[cfg(unix)]
     pub fn new(addr: usize, len: usize) -> Result<Self, Error> {
-        use libc::{mmap, MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, PROT_NONE};
+        use libc::{mmap, MAP_ANON, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_NONE};
 
         let addr = unsafe {
             mmap(
                 addr as _,
                 len,
                 PROT_NONE,
-                MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+                MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE,
                 -1,
                 0,
             )
         };
 
         if addr == MAP_FAILED {
+            return Err(Error::last_os_error());
+        }
+
+        Ok(Self {
+            addr: addr as _,
+            len,
+        })
+    }
+
+    #[cfg(unix)]
+    pub fn new_shared(
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        fd: i32,
+        offset: i64,
+    ) -> Result<Self, Error> {
+        use libc::{
+            mmap, MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_NORESERVE, MAP_PRIVATE,
+            MAP_SHARED, PROT_NONE,
+        };
+
+        use crate::error;
+
+        let addr = unsafe {
+            mmap(
+                addr as _,
+                len,
+                prot.into_host(),
+                MAP_SHARED | MAP_FIXED_NOREPLACE,
+                fd,
+                offset,
+            )
+        };
+
+        if addr == MAP_FAILED {
+            error!("new_shared failed: {}", Error::last_os_error());
             return Err(Error::last_os_error());
         }
 
