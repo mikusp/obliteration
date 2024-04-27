@@ -775,50 +775,6 @@ impl Vm {
         )
     }
 
-    fn find_free_area(&self, addr: usize, len: usize) -> Result<usize, MmapError> {
-        let mappings = self.mappings.read().unwrap();
-
-        let addr = if addr == 0 { 0x400000 } else { addr };
-
-        if mappings.is_empty() {
-            return Ok(addr);
-        }
-
-        let mut first_run = true;
-
-        let mut previous_end = 0x400000; // try minimum mapping
-        for i in mappings.range(addr..).into_iter() {
-            info!("find_free_area: trying {:?}", i);
-            if first_run && *i.0 > (addr + len) {
-                return Ok(addr);
-            }
-
-            // if addr > *i.0 || addr < previous_end {
-            //     previous_end = (i.1.end() as usize + 0x3fff) & 0xffffffffffffc000;
-            //     continue;
-            // }
-
-            // assert!(addr >= previous_end, "{:#x}, {:#x}", addr, previous_end);
-
-            if i.0 - previous_end > len && previous_end >= addr {
-                // info!(
-                //     "found free area at {:#x} starting from {:#x}",
-                //     previous_end, addr
-                // );
-                return Ok(previous_end);
-            }
-
-            previous_end = (i.1.end() as usize + 0x3fff) & 0xffffffffffffc000;
-            first_run = false;
-        }
-
-        error!(
-            "couldn't find area from {:#x} of {:#x} bytes (end of allocated area {:#x})",
-            addr, len, previous_end
-        );
-        Ok(max(addr, previous_end))
-    }
-
     /// See `vm_mmap` on the PS4 for a reference.
     fn map(
         &self,
