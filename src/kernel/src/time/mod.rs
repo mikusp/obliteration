@@ -1,7 +1,7 @@
 use crate::errno::{Errno, EINVAL};
-use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::{info, warn};
 use std::num::NonZeroI32;
 use std::sync::Arc;
 use thiserror::Error;
@@ -15,6 +15,7 @@ impl TimeManager {
         sys.register(116, &time, Self::sys_gettimeofday);
         sys.register(232, &time, Self::sys_clock_gettime);
         sys.register(234, &time, Self::sys_clock_getres);
+        sys.register(638, &time, Self::sys_utc_to_localtime);
 
         time
     }
@@ -105,6 +106,12 @@ impl TimeManager {
                 }
             }
         }
+
+        Ok(SysOut::ZERO)
+    }
+
+    fn sys_utc_to_localtime(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        warn!("sys_utc_to_localtime");
 
         Ok(SysOut::ZERO)
     }
