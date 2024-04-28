@@ -8,6 +8,7 @@ use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::time::TimeSpec;
 use crate::{error, info, warn};
 use std::convert::Infallible;
+use std::ptr;
 use std::sync::{Arc, Weak};
 
 pub struct KernelQueueManager {}
@@ -51,23 +52,35 @@ impl KernelQueueManager {
     }
 
     fn sys_kevent(self: &Arc<Self>, _td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-        let fd: i32 = i.args[0].try_into().unwrap();
+        let kq: usize = i.args[0].into();
         let changelist: *const Kevent = i.args[1].into();
         let nchanges: i32 = i.args[2].try_into().unwrap();
         let eventlist: *mut Kevent = i.args[3].into();
         let nevents: i32 = i.args[4].try_into().unwrap();
         let timeout: *const TimeSpec = i.args[5].into();
 
+        let fd = (kq & 0xffffffff) as u32;
+        let obj = (kq >> 0x20) as u32;
+
         info!(
-            "sys_kevent({}, {:#x}, {}, {:#x}, {}, {:#x})",
-            fd, changelist as usize, nchanges, eventlist as usize, nevents, timeout as usize
+            "sys_kevent({} ({}), {:#x}, {}, {:#x}, {}, {:#x})",
+            fd, obj, changelist as usize, nchanges, eventlist as usize, nevents, timeout as usize
         );
 
         let changes = unsafe { std::slice::from_raw_parts(changelist, nchanges as _) };
 
         info!("changes: {:?}", changes);
 
-        todo!();
+        if nevents == 0 {
+            return Ok(SysOut::ZERO);
+        }
+
+        if timeout != ptr::null() {
+            warn!("kevent: stubbed elapsed timeout");
+            return Ok(SysOut::ZERO);
+        }
+
+        todo!()
     }
 }
 
