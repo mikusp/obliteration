@@ -369,7 +369,9 @@ impl Vm {
                     })
             };
 
-            if candidate + len < search_end && candidate + len < self.dmem.size {
+            info!("candidate {:#x}", candidate);
+
+            if candidate + len <= search_end && candidate + len <= self.dmem.size {
                 let phys_addr = PhysAddr(candidate);
                 let alloc = DmemAllocation {
                     phys_addr,
