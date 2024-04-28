@@ -40,7 +40,17 @@ impl DeviceDriver for Dce {
         _: Option<&VThread>,
     ) -> Result<(), Box<dyn Errno>> {
         match cmd {
-            IoCmd::DCEUNK1(_) => error!("dceunk1"),
+            IoCmd::DCEFLIPCONTROL(args) => match args.arg2 {
+                9 => {
+                    info!("dceflipcontrol 9");
+
+                    unsafe {
+                        *(args.size as *mut u64) = 0;
+                        *(args.foo as *mut u64) = 0x100000;
+                    }
+                }
+                _ => error!("unknown op id DCEFLIPCONTROL"),
+            },
             _ => todo!(),
         }
 
@@ -75,4 +85,15 @@ impl DceManager {
 pub enum DceInitError {
     #[error("cannot create dce device")]
     CreateDceFailed(#[from] MakeDevError),
+}
+
+#[derive(Debug)]
+pub struct DceFlipControl {
+    id: u32,
+    spare: u32,
+    arg2: usize,
+    ptr: usize,
+    size: usize,
+    foo: u64,
+    bar: u64,
 }

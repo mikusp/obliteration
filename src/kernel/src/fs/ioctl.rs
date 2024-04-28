@@ -1,5 +1,5 @@
 use super::FioDeviceGetNameArg;
-use crate::dev::{DmemAllocate, DmemAvailable, DmemQuery, PrtAperture, RngInput};
+use crate::dev::{DceFlipControl, DmemAllocate, DmemAvailable, DmemQuery, PrtAperture, RngInput};
 use crate::dmem::{BlockpoolExpandArgs, BlockpoolStats};
 use crate::errno::ENOTTY;
 use crate::syscalls::SysErr;
@@ -97,7 +97,7 @@ commands! {
         BNETUNK(&Unknown36) = 0x802450c9,
 
         /// dce commands
-        DCEUNK1(&mut Unknown48) = 0xC0308203,
+        DCEFLIPCONTROL(&mut DceFlipControl) = 0xC0308203,
 
         /// Get media size in bytes.
         DIOCGMEDIASIZE(&mut i64) = 0x40086418,
