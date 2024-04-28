@@ -193,7 +193,7 @@ impl ProcManager {
             acts.set_modern(sig);
 
             if flags.intersects(SignalFlags::SA_RESTART) {
-                todo!("sys_sigaction with act.flags & 0x2 != 0");
+                acts.remove_interrupt(sig);
             } else {
                 acts.set_interupt(sig);
             }

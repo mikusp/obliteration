@@ -51,6 +51,10 @@ impl SignalActs {
         self.stack.remove(sig);
     }
 
+    pub fn remove_interrupt(&mut self, sig: Signal) {
+        self.interupt.remove(sig)
+    }
+
     pub fn set_interupt(&mut self, sig: Signal) {
         self.interupt.add(sig);
     }
