@@ -716,6 +716,7 @@ impl Vm {
                         if name == "gc".to_string()
                             || name == "dmem1".to_string()
                             || name == "hmd_dist".to_string()
+                            || name == "dce".to_string()
                         {
                             //ignore
                         } else {
@@ -1023,6 +1024,8 @@ impl Vm {
                         // nothing
                     } else if b.name() == Some("hmd_dist".to_string()) {
                         // nothing
+                    } else if b.name() == Some("dce".to_string()) {
+                        // nothing
                     } else {
                         todo!("{:?}", b.name())
                     }
@@ -1281,6 +1284,7 @@ impl Vm {
                             if name == "gc".to_string()
                                 || name == "dmem1".to_string()
                                 || name == "hmd_dist".to_string()
+                                || name == "dce".to_string()
                             {
                                 self.alloc_and_insert_mapping(mappings, start_addr, len, prot, name)
                             } else {
@@ -1491,11 +1495,6 @@ impl Vm {
                 let potential_conflicts = mappings.range(0x7_E000_0000..0x7_F000_0000);
 
                 for (_entry_addr, mapping) in potential_conflicts.rev() {
-                    info!(
-                        "potential conflict for stack: {:#x}-{:#x}",
-                        mapping.addr as usize,
-                        mapping.end() as usize
-                    );
                     if (start >= mapping.addr as usize && start < mapping.end() as usize)
                         || (end >= mapping.addr as usize && end < mapping.end() as usize)
                     {
