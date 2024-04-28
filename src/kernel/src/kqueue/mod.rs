@@ -5,7 +5,8 @@ use crate::fs::{
 };
 use crate::process::{FileDesc, VThread};
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
-use crate::{error, warn};
+use crate::time::TimeSpec;
+use crate::{error, info, warn};
 use std::convert::Infallible;
 use std::sync::{Arc, Weak};
 
@@ -17,6 +18,7 @@ impl KernelQueueManager {
 
         sys.register(141, &kq, Self::sys_kqueueex);
         sys.register(362, &kq, Self::sys_kqueue);
+        sys.register(363, &kq, Self::sys_kevent);
 
         kq
     }
@@ -46,6 +48,26 @@ impl KernelQueueManager {
         )?;
 
         Ok(fd.into())
+    }
+
+    fn sys_kevent(self: &Arc<Self>, _td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let fd: i32 = i.args[0].try_into().unwrap();
+        let changelist: *const Kevent = i.args[1].into();
+        let nchanges: i32 = i.args[2].try_into().unwrap();
+        let eventlist: *mut Kevent = i.args[3].into();
+        let nevents: i32 = i.args[4].try_into().unwrap();
+        let timeout: *const TimeSpec = i.args[5].into();
+
+        info!(
+            "sys_kevent({}, {:#x}, {}, {:#x}, {}, {:#x})",
+            fd, changelist as usize, nchanges, eventlist as usize, nevents, timeout as usize
+        );
+
+        let changes = unsafe { std::slice::from_raw_parts(changelist, nchanges as _) };
+
+        info!("changes: {:?}", changes);
+
+        todo!();
     }
 }
 
@@ -92,4 +114,15 @@ impl crate::fs::FileBackend for FileBackend {
     ) -> Result<(), Box<dyn Errno>> {
         Err(Box::new(DefaultFileBackendError::InvalidValue))
     }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct Kevent {
+    ident: usize,
+    filter: i16,
+    flags: u16,
+    fflags: u32,
+    data: usize,
+    udata: usize,
 }
