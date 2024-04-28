@@ -1,9 +1,31 @@
+use bitflags::bitflags;
+
 use crate::{
     errno::EINVAL,
+    info,
     process::VThread,
-    syscalls::{SysErr, SysIn, SysOut, Syscalls},
+    syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls},
+    time::TimeSpec,
+    umtx::{
+        condvar::Condvar,
+        futex::{futex_wait, Timespec},
+        mutex::Mutex,
+    },
+    warn,
 };
-use std::sync::Arc;
+use std::{
+    hint,
+    num::TryFromIntError,
+    ptr,
+    sync::{
+        atomic::{AtomicI64, AtomicU32, Ordering},
+        Arc,
+    },
+};
+
+mod condvar;
+mod futex;
+mod mutex;
 
 pub(super) struct UmtxManager {}
 
@@ -66,7 +88,29 @@ fn unlock_umtx(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 
 #[allow(unused_variables)] // TODO: remove when implementing
 fn wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+    let obj: *const i64 = i.args[0].into();
+    let val: i64 = i.args[2].into();
+    let timeout: *const Timespec = i.args[3].into();
+
+    info!("sys__umtx_wait({:#x}, {:#x})", obj as usize, val);
+
+    if timeout != ptr::null() {
+        todo!("wait: timeout")
+    }
+
+    let atomic = unsafe { AtomicI64::from_ptr(obj as _) };
+
+    loop {
+        let value = atomic.load(Ordering::Relaxed);
+
+        if value != val {
+            break;
+        }
+
+        hint::spin_loop();
+    }
+
+    Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
@@ -86,7 +130,17 @@ fn lock_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 
 #[allow(unused_variables)] // TODO: remove when implementing
 fn unlock_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+    let mutex_ptr: *const Umutex = i.args[0].into();
+
+    info!("sys__umtx_mutex_unlock({:#x})", mutex_ptr as usize);
+
+    let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
+
+    unsafe {
+        inner_mutex.unlock();
+    }
+
+    Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
@@ -94,9 +148,27 @@ fn set_ceiling(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
-#[allow(unused_variables)] // TODO: remove when implementing
 fn cv_wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+    let ucond_ptr: *const Ucond = i.args[0].into();
+    let flags: CvWaitFlags = i.args[2].try_into().unwrap();
+    let mutex_ptr: *const Umutex = i.args[3].into();
+    let timeout: *const TimeSpec = i.args[4].into();
+
+    info!(
+        "sys__umtx_cv_wait({:#x}, {:?}, {:#x}, {:#x})",
+        ucond_ptr as usize, flags, mutex_ptr as usize, timeout as usize
+    );
+
+    if timeout != ptr::null() {
+        todo!("cv_wait: timeout is not null")
+    }
+
+    let inner_cv = unsafe { Condvar::from_ptr(ucond_ptr as _) };
+    let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
+
+    unsafe { inner_cv.wait(&inner_mutex) };
+
+    Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
@@ -109,9 +181,18 @@ fn cv_broadcast(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
-#[allow(unused_variables)] // TODO: remove when implementing
-fn wait_uint(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+fn wait_uint(_: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    let obj: *const u32 = i.args[0].into();
+    let val: u32 = i.args[2].try_into().unwrap();
+
+    info!("sys__umtx_wait_uint({:#x}, {:#x}", obj as usize, val);
+
+    unsafe {
+        let futex = AtomicU32::from_ptr(obj as _);
+        futex_wait(futex, val, None);
+    }
+
+    Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
@@ -141,17 +222,52 @@ fn wake_private(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 
 #[allow(unused_variables)] // TODO: remove when implementing
 fn wait_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+    let mutex_ptr: *const Umutex = i.args[0].into();
+
+    info!("sys__umtx_wait_umutex({:#x})", mutex_ptr as usize);
+
+    let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
+
+    inner_mutex.wait();
+
+    Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
 fn wake_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+    let mutex_ptr: *const Umutex = i.args[0].into();
+
+    info!("sys__umtx_wake_umutex({:#x})", mutex_ptr as usize);
+
+    let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
+
+    unsafe {
+        inner_mutex.wake();
+    }
+
+    Ok(SysOut::ZERO)
 }
 
-#[allow(unused_variables)] // TODO: remove when implementing
 fn sem_wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+    let sem_ptr: *const Usem2 = i.args[0].into();
+    let arg_size: u32 = i.args[3].try_into().unwrap();
+    let arg: usize = i.args[4].into();
+
+    info!(
+        "sys__umtx_sem_wait({:#x}, {:#x}, {:#x})",
+        sem_ptr as usize, arg_size, arg
+    );
+
+    let inner_count = unsafe { AtomicU32::from_ptr(sem_ptr as _) };
+
+    loop {
+        if inner_count.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+        hint::spin_loop();
+    }
+
+    Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
@@ -167,4 +283,45 @@ fn nwake_private(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 #[allow(unused_variables)] // TODO: remove when implementing
 fn wake2_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct Ucond {
+    has_waiters: u32,
+    flags: u32,
+    clock_id: u32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct Umutex {
+    owner: i32,
+    flags: u32,
+    ceilings: [u32; 2],
+    rb_lnk: usize,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct Usem2 {
+    count: u32,
+    flags: u32,
+}
+
+bitflags! {
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct CvWaitFlags: u32 {
+        const AbsTime = 0x02;
+        const ClockId = 0x04;
+    }
+}
+
+impl TryFrom<SysArg> for CvWaitFlags {
+    type Error = TryFromIntError;
+
+    fn try_from(value: SysArg) -> Result<Self, Self::Error> {
+        Ok(Self::from_bits_retain(value.get().try_into()?))
+    }
 }
