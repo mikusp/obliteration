@@ -75,6 +75,10 @@ impl RegMgr {
                 warn!("stubbed regmgr_call(0x1b)");
                 return Ok(SysOut::ZERO);
             }
+            0x1d => {
+                warn!("stubbed regmgr_call(0x1d)");
+                return Ok(SysOut::ZERO);
+            }
             0x27 | 0x40.. => Err(RegError::V800d0219),
             v => todo!("regmgr_call({v})"),
         };
@@ -85,6 +89,10 @@ impl RegMgr {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(e, "regmgr_call({op}) failed");
+
+                    if let RegError::NotFound(RegKey(0x7802b700)) = e {
+                        // std::intrinsics::breakpoint()
+                    }
                     e.code()
                 }
             }

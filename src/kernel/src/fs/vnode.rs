@@ -339,7 +339,7 @@ impl FileBackend for VnodeFileBackend {
     }
 
     fn stat(&self, file: &VFile, td: Option<&VThread>) -> Result<Stat, Box<dyn Errno>> {
-        todo!()
+        todo!("stat")
     }
 
     fn truncate(

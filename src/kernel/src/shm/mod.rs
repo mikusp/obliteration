@@ -7,7 +7,7 @@ use crate::fs::{
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{Gid, Ucred, Uid};
-use crate::vm::{MappingFlags, MmapError, Protections};
+use crate::vm::{MappingFlags, MmapError, Protections, VmObject};
 use crate::{error, info};
 use bitflags::Flags;
 use macros::Errno;
@@ -34,7 +34,7 @@ impl SharedMemoryManager {
         let flags: OpenFlags = i.args[1].try_into().unwrap();
         let mode: u32 = i.args[2].try_into().unwrap();
 
-        info!("sys_shm_open({:?}, {}, {})", path, flags, mode);
+        info!("...=sys_shm_open({:?}, {}, {})", path, flags, mode);
 
         if (flags & OpenFlags::O_ACCMODE).union(OpenFlags::O_RDWR) != OpenFlags::O_RDWR {
             return Err(SysErr::Raw(EINVAL));
@@ -48,8 +48,9 @@ impl SharedMemoryManager {
 
         #[allow(unused_variables)] // TODO: remove when implementing.
         let mode = mode & filedesc.cmask() & 0o777;
+        let path_ = path.clone();
 
-        let fd = filedesc.alloc_without_budget::<ShmError>(|_| match path {
+        let fd = filedesc.alloc_without_budget::<ShmError>(|_| match path.clone() {
             ShmPath::Anon => {
                 todo!()
             }
@@ -97,6 +98,8 @@ impl SharedMemoryManager {
             }
         })?;
 
+        info!("{}=sys_shm_open({:?}, {}, {})", fd, path_, flags, mode);
+
         Ok(fd.into())
     }
 
@@ -105,34 +108,36 @@ impl SharedMemoryManager {
         todo!("sys_shm_unlink")
     }
 
-    pub fn mmap(file: Arc<VFile>, len: usize, offset: i64) -> Result<usize, MmapError> {
+    pub fn mmap(file: Arc<VFile>, len: usize, offset: i64) -> Result<VmObject, MmapError> {
         let backend = file.backend().as_ref() as &dyn Any;
         let shmfd: &SharedMemory = (backend as &dyn Any)
             .downcast_ref()
             .expect("shm handle is not shm");
 
-        use std::os::fd::AsRawFd;
+        // use std::os::fd::AsRawFd;
 
-        let addr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                shmfd.shm_fd.as_raw_fd(),
-                offset,
-            )
-        };
+        // let addr = unsafe {
+        //     libc::mmap(
+        //         std::ptr::null_mut(),
+        //         len,
+        //         libc::PROT_READ | libc::PROT_WRITE,
+        //         libc::MAP_SHARED,
+        //         shmfd.shm_fd.as_raw_fd(),
+        //         offset,
+        //     )
+        // };
 
-        if addr == libc::MAP_FAILED {
-            Err(MmapError::NoMem(len))
-        } else {
-            Ok(addr as usize)
-        }
+        // if addr == libc::MAP_FAILED {
+        //     Err(MmapError::NoMem(len))
+        // } else {
+        //     Ok(addr as usize)
+        // }
+
+        Ok(VmObject {})
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ShmPath {
     Anon,
     Path(VPathBuf),
@@ -146,12 +151,11 @@ pub struct SharedMemory {
     uid: Uid,
     gid: Gid,
     mode: Mode,
-    shm_fd: memfd::Memfd,
+    pub shm_fd: memfd::Memfd,
 }
 
 impl SharedMemory {
     /// See `shm_do_truncate` on the PS4 for a reference.
-    #[allow(unused_variables)] // TODO: remove when implementing.
     fn do_truncate(&self, length: TruncateLength) -> Result<(), TruncateError> {
         info!("shm_do_truncate({:?}, {:#x})", self.path, length.0);
 
@@ -180,6 +184,12 @@ impl SharedMemory {
         check_access(cred, self.uid, self.gid, self.mode, access, false)?;
 
         Ok(())
+    }
+
+    pub fn fd(&self) -> i32 {
+        use std::os::fd::AsRawFd;
+
+        self.shm_fd.as_raw_fd()
     }
 }
 

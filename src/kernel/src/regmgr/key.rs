@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 /// A unique identifier for a registry entry.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegKey(u32);
+pub struct RegKey(pub u32);
 
 #[allow(dead_code)] // Removes complaints about unused Regkeys.
 impl RegKey {

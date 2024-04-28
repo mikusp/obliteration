@@ -1,15 +1,16 @@
 use crate::errno::{Errno, EBADF, EBUSY, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ESPIPE};
-use crate::info;
 use crate::process::{GetFileError, VThread};
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::PrivilegeError;
 use crate::ucred::{Privilege, Ucred};
-use bitflags::bitflags;
+use crate::{error, info, warn};
+use bitflags::{bitflags, Flags};
 use gmtx::{Gutex, GutexGroup};
 use macros::{vpath, Errno};
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::fmt::{Display, Formatter};
+use std::io::Read;
 use std::num::TryFromIntError;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -373,7 +374,21 @@ impl Fs {
 
         info!("Reading {len} bytes from fd {fd}.");
 
-        todo!()
+        let file = td.proc().files().get_for_read(fd)?;
+        let mut offset = file.offset_mut();
+        let read = unsafe {
+            file.backend()
+                .read(
+                    file.as_ref(),
+                    *offset,
+                    &mut [IoVecMut::new(ptr, IoLen::from_usize(len)?)],
+                    Some(td),
+                )
+                .map_err(|_| SysErr::Raw(EINVAL))?
+        };
+        *offset = *offset + read.get() as u64;
+
+        Ok(read.into())
     }
 
     fn sys_write(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -420,7 +435,7 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            warn!("open({path}) with flags & O_TRUNC");
         } else if flags.intersects(OpenFlags::O_CREAT) {
             let mode: i64 = i.args[2].try_into().unwrap();
             todo!("open({path}, {flags}) with mode = {mode:#x}");
@@ -465,7 +480,7 @@ impl Fs {
 
     /// See `kern_ioctl` on the PS4 for a reference.
     fn ioctl(self: &Arc<Self>, fd: i32, cmd: IoCmd, td: &VThread) -> Result<SysOut, IoctlError> {
-        let file = td.proc().files().get(fd)?;
+        let mut file = td.proc().files().get(fd)?;
 
         if !file
             .flags()
@@ -787,7 +802,8 @@ impl Fs {
         let nfds: u32 = i.args[1].try_into().unwrap();
         let timeout: i32 = i.args[2].try_into().unwrap();
 
-        todo!()
+        error!("sys_poll({:#x}, {}, {:#x})", fds as usize, nfds, timeout);
+        Ok((nfds as usize).into())
     }
 
     fn sys_lseek(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -801,7 +817,7 @@ impl Fs {
 
         info!("Seeking fd {fd} with whence = {whence:?} and offset = {offset}.");
 
-        let file = td.proc().files().get(fd)?;
+        let mut file = td.proc().files().get(fd)?;
 
         if !file.is_seekable() {
             return Err(SysErr::Raw(ESPIPE));
@@ -811,6 +827,7 @@ impl Fs {
 
         match whence {
             Whence::Set => {}
+            Whence::Current if offset == 0 => return Ok(SysOut::ZERO),
             Whence::Current => todo!("lseek with whence = SEEK_CUR"),
             Whence::End => todo!(),
             Whence::Data => {
@@ -890,7 +907,7 @@ impl Fs {
         td: Option<&VThread>,
     ) -> Result<SysOut, SysErr> {
         // This will require relative lookups
-        todo!()
+        todo!("mkdirat")
     }
 
     /// Gets root vnode of the mounted filesystem if `vn` is currently mounted or follow it if it is
