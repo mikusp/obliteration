@@ -2367,7 +2367,7 @@ impl Vm {
                     self.mmap_dmem_internal(
                         arg.addr,
                         arg.len,
-                        arg.ty.try_into().unwrap(),
+                        MemoryType::Any,
                         arg.prot.try_into().unwrap(),
                         flags,
                         arg.offset,
