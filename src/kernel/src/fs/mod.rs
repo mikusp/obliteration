@@ -375,7 +375,21 @@ impl Fs {
 
         info!("Reading {len} bytes from fd {fd}.");
 
-        todo!()
+        let file = td.proc().files().get_for_read(fd)?;
+        let mut offset = file.offset_mut();
+        let read = unsafe {
+            file.backend()
+                .read(
+                    file.as_ref(),
+                    *offset,
+                    &mut [IoVecMut::new(ptr, IoLen::from_usize(len)?)],
+                    Some(td),
+                )
+                .map_err(|_| SysErr::Raw(EINVAL))?
+        };
+        *offset = *offset + read.get() as u64;
+
+        Ok(read.into())
     }
 
     fn sys_write(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
