@@ -32,6 +32,7 @@ use humansize::format_size;
 use humansize::DECIMAL;
 use macros::Errno;
 use std::any::Any;
+use std::borrow::BorrowMut;
 use std::cmp::max;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -42,6 +43,7 @@ use std::iter::Map;
 use std::mem::size_of;
 use std::num::TryFromIntError;
 use std::os::raw::c_void;
+use std::pin::pin;
 use std::ptr::null_mut;
 use std::sync::RwLockWriteGuard;
 use std::sync::{Arc, RwLock};
@@ -407,35 +409,202 @@ impl Vm {
         for i in self.dmem_allocations.read().unwrap().values().into_iter() {
             if phys_addr >= i.phys_addr && (phys_addr.0 + len) <= (i.phys_addr.0 + i.len) {
                 let free_addr = self.findspace(addr, len)?;
+                info!(
+                    "requested addr: {:#x}, found free addr: {:#x}",
+                    addr, free_addr
+                );
 
-                let virt_addr = self
-                    .dmem
-                    .native_dmem
-                    .map(free_addr, len, prot, phys_addr)
-                    .ok_or(SysErr::Raw(ENOMEM))?;
+                if free_addr == addr || !flags.intersects(MappingFlags::MAP_FIXED) {
+                    let virt_addr = self
+                        .dmem
+                        .native_dmem
+                        .map(free_addr, len, prot, phys_addr)
+                        .ok_or(SysErr::Raw(ENOMEM))?;
 
-                if flags.intersects(MappingFlags::MAP_FIXED) && virt_addr != addr {
-                    todo!("mmap_dmem with MAP_FIXED returned incorrect address");
+                    if flags.intersects(MappingFlags::MAP_FIXED) && virt_addr != addr {
+                        todo!(
+                            "mmap_dmem with MAP_FIXED returned incorrect address: {:#x}",
+                            virt_addr
+                        );
+                    }
+
+                    let mapping = Mapping {
+                        addr: virt_addr as _,
+                        len,
+                        prot,
+                        name,
+                        storage: Arc::new(*i),
+                        locked: false,
+                        mem_type: Some(mem_type),
+                    };
+
+                    info!("Dmem::mmap(): {:?}", mapping);
+
+                    self.mappings
+                        .write()
+                        .unwrap()
+                        .insert(virt_addr, mapping.clone());
+
+                    return Ok(mapping);
+                } else {
+                    //our addr is occupied by a mapping
+                    let mut mappings = self.mappings.write().unwrap();
+
+                    let mut affected_mappings = Vec::new();
+
+                    for m in mappings.iter() {
+                        if addr <= (m.1.end() as usize - 1)
+                            && (m.1.addr as usize) <= (addr + len - 1)
+                        {
+                            affected_mappings.push(m.1);
+                        }
+                    }
+
+                    if affected_mappings.len() == 1 {
+                        let mapping = affected_mappings.first().unwrap();
+
+                        if mapping.addr as usize == addr && mapping.len == len {
+                            let old_mapping = mappings.remove(&addr).unwrap();
+                            drop(old_mapping.storage);
+
+                            self.dmem
+                                .native_dmem
+                                .map_overwrite(addr, len, prot, phys_addr)
+                                .ok_or(SysErr::Raw(ENOMEM))?;
+
+                            let mapping = Mapping {
+                                addr: addr as _,
+                                len,
+                                prot,
+                                name: old_mapping.name.clone(),
+                                storage: Arc::new(DmemAllocation {
+                                    phys_addr,
+                                    len,
+                                    mem_type,
+                                }),
+                                locked: false,
+                                mem_type: Some(mem_type),
+                            };
+
+                            assert!(mappings.insert(addr, mapping.clone()).is_none());
+                            // mappings.entry(addr).and_modify(|mapping| {
+                            //     mapping.storage.dr
+                            // });
+
+                            drop(mappings);
+                            self.validate_mappings();
+
+                            return Ok(mapping);
+                        } else if mapping.addr as usize == addr {
+                            // we have one conflicting mapping and we're replacing the beginning
+                            let old_mapping = mappings.remove(&addr).unwrap();
+                            let old_storage = old_mapping.storage;
+
+                            // intentionally leak the old storage to prevent deallocation
+                            let _ = Arc::<dyn Storage>::into_raw(old_storage.clone());
+
+                            let adjusted_storage = unsafe {
+                                Memory::raw(old_storage.ptr() as usize + len, old_mapping.len - len)
+                            };
+
+                            let adjusted_mapping = unsafe {
+                                Mapping {
+                                    addr: old_mapping.addr.byte_add(len),
+                                    len: old_mapping.len - len,
+                                    prot: old_mapping.prot,
+                                    name: old_mapping.name,
+                                    storage: Arc::new(adjusted_storage),
+                                    locked: old_mapping.locked,
+                                    mem_type: old_mapping.mem_type,
+                                }
+                            };
+
+                            let new_storage = DmemAllocation {
+                                phys_addr,
+                                len,
+                                mem_type,
+                            };
+
+                            self.dmem
+                                .native_dmem
+                                .map_overwrite(addr, len, prot, phys_addr)
+                                .ok_or(SysErr::Raw(ENOMEM))?;
+
+                            let new_mapping = Mapping {
+                                addr: addr as _,
+                                len,
+                                prot,
+                                name: "dmem".to_string(),
+                                storage: Arc::new(new_storage),
+                                locked: false,
+                                mem_type: Some(mem_type),
+                            };
+
+                            assert!(mappings.insert(addr, new_mapping.clone()).is_none());
+                            assert!(mappings.insert(addr + len, adjusted_mapping).is_none());
+                            drop(mappings);
+                            self.validate_mappings();
+
+                            return Ok(new_mapping);
+                        } else if mapping.end() as usize == addr + len {
+                            let mapping_addr = mapping.addr as usize;
+                            // we have one conflicting mapping and we're replacing the end
+                            let old_mapping = mappings.remove(&mapping_addr).unwrap();
+                            let old_storage = old_mapping.storage;
+
+                            // intentionally leak the old storage to prevent deallocation
+                            let _ = Arc::<dyn Storage>::into_raw(old_storage.clone());
+
+                            let adjusted_storage = unsafe {
+                                Memory::raw(old_storage.ptr() as usize, old_mapping.len - len)
+                            };
+
+                            let adjusted_mapping = Mapping {
+                                addr: old_mapping.addr,
+                                len: old_mapping.len - len,
+                                prot: old_mapping.prot,
+                                name: old_mapping.name,
+                                storage: Arc::new(adjusted_storage),
+                                locked: old_mapping.locked,
+                                mem_type: old_mapping.mem_type,
+                            };
+
+                            let new_storage = DmemAllocation {
+                                phys_addr,
+                                len,
+                                mem_type,
+                            };
+
+                            self.dmem
+                                .native_dmem
+                                .map_overwrite(addr, len, prot, phys_addr)
+                                .ok_or(SysErr::Raw(ENOMEM))?;
+
+                            let new_mapping = Mapping {
+                                addr: addr as _,
+                                len,
+                                prot,
+                                name: "dmem".to_string(),
+                                storage: Arc::new(new_storage),
+                                locked: false,
+                                mem_type: Some(mem_type),
+                            };
+
+                            assert!(mappings
+                                .insert(old_mapping.addr as usize, adjusted_mapping)
+                                .is_none());
+                            assert!(mappings.insert(addr, new_mapping.clone()).is_none());
+                            drop(mappings);
+                            self.validate_mappings();
+
+                            return Ok(new_mapping);
+                        } else {
+                            todo!("{:?}", mapping)
+                        }
+                    } else {
+                        todo!("{:?}", affected_mappings)
+                    }
                 }
-
-                let mapping = Mapping {
-                    addr: virt_addr as _,
-                    len,
-                    prot,
-                    name,
-                    storage: Arc::new(*i),
-                    locked: false,
-                    mem_type: Some(mem_type),
-                };
-
-                info!("Dmem::mmap(): {:?}", mapping);
-
-                self.mappings
-                    .write()
-                    .unwrap()
-                    .insert(virt_addr, mapping.clone());
-
-                return Ok(mapping);
             }
         }
         error!("mmap_dmem failed, {:#x} is not allocated?", phys_addr.0);
@@ -482,6 +651,7 @@ impl Vm {
             let candidate = (i.phys_addr.0 + i.len)
                 + ((i.phys_addr.0 + i.len) as *const c_void).align_offset(align);
 
+            //todo: subtract overflow
             let size = j.phys_addr.0 - candidate;
             info!("candidate {:#x}, size {:#x}", candidate, size);
 
@@ -1319,38 +1489,40 @@ impl Vm {
     fn findspace(&self, start: usize, len: usize) -> Result<usize, MmapError> {
         let mappings = self.mappings.write().unwrap();
 
-        let area_end = |a| {
+        let area = |a| {
             if a >= 0x40_0000 && a < 0x8000_0000 {
-                0x8000_0000
+                (0x40_0000, 0x8000_0000)
             } else if a >= 0x8000_0000 && a < 0x2_0000_0000 {
-                0x2_0000_0000
+                (0x8000_0000, 0x2_0000_0000)
             } else if a >= 0x2_0000_0000 && a < 0x7_0000_0000 {
-                0x7_0000_0000
+                (0x2_0000_0000, 0x7_0000_0000)
             } else if a >= 0x7_E000_0000 && a < 0x7_F000_0000 {
-                0x7_F000_0000
+                (0x7_E000_0000, 0x7_F000_0000)
             } else if a >= 0xF_E000_0000 && a < 0xF_F000_0000 {
-                0xF_F000_0000
+                (0xF_E000_0000, 0xF_F000_0000)
             } else if a >= 0xF_F000_0000 && a < 0xF_F004_0000 {
-                0xF_F004_0000
+                (0xF_F000_0000, 0xF_F004_0000)
             } else if a >= 0x10_0000_0000 && a < 0xFC_0000_0000 {
-                0xFC_0000_0000
+                (0x10_0000_0000, 0xFC_0000_0000)
             } else if a >= 0x5000_0000_0000 && a < 0x1_0000_0000_0000 {
-                0x1_0000_0000_0000
+                (0x5000_0000_0000, 0x1_0000_0000_0000)
             } else {
                 todo!("area_end {:#x}", a)
             }
         };
 
+        let range = area(start).0..area(start).1;
+        let potential_conflicts = mappings.range(range);
+
         let mut start = start;
         let mut end = start + len;
         'outer: loop {
-            if start >= area_end(start) {
+            if start >= area(start).1 {
                 break;
             }
 
-            let potential_conflicts = mappings.range(start..end);
-
-            for (_entry_addr, mapping) in potential_conflicts {
+            for (_entry_addr, mapping) in potential_conflicts.clone() {
+                // info!("potential conflict: {:?}", mapping);
                 if (end <= mapping.addr as usize) || (start >= mapping.end() as usize) {
                     continue;
                 } else {
@@ -1407,7 +1579,7 @@ impl Vm {
             match ret {
                 Err(_) => todo!(),
                 Ok(v) if v == addr => {} // the area is free, no need to worry about unmapping
-                Ok(_) => {
+                Ok(v) => {
                     if len == 0x4000 && prot.is_empty() && flags.intersects(MappingFlags::MAP_VOID)
                     {
                         let _ = self.mprotect(addr as _, len, prot);
@@ -1416,7 +1588,135 @@ impl Vm {
 
                         return Ok(mappings.get(&addr).unwrap().clone());
                     } else {
-                        todo!()
+                        let mut mappings = self.mappings.write().unwrap();
+
+                        let mut affected_mappings = Vec::new();
+
+                        for m in mappings.iter() {
+                            if addr <= (m.1.end() as usize - 1)
+                                && (m.1.addr as usize) <= (addr + len - 1)
+                            {
+                                affected_mappings.push(m.1);
+                            }
+                        }
+
+                        if affected_mappings.len() == 1 {
+                            let mapping = affected_mappings.first().unwrap();
+
+                            if mapping.addr as usize == addr && mapping.len == len {
+                                let old_mapping = mappings.remove(&addr).unwrap();
+                                drop(old_mapping.storage);
+
+                                let mapping = self
+                                    .alloc(addr, len, prot, name)
+                                    .map_err(|_| MmapError::NoMem(len))?;
+
+                                assert!(mappings.insert(addr, mapping.clone()).is_none());
+                                // mappings.entry(addr).and_modify(|mapping| {
+                                //     mapping.storage.dr
+                                // });
+
+                                drop(mappings);
+                                self.validate_mappings();
+
+                                return Ok(mapping);
+                            } else if mapping.addr as usize == addr {
+                                // we have one conflicting mapping and we're replacing the beginning
+                                let old_mapping = mappings.remove(&addr).unwrap();
+                                let old_storage = old_mapping.storage;
+
+                                // intentionally leak the old storage to prevent deallocation
+                                let _ = Arc::<dyn Storage>::into_raw(old_storage.clone());
+
+                                let adjusted_storage = unsafe {
+                                    Memory::raw(
+                                        old_storage.ptr() as usize + len,
+                                        old_mapping.len - len,
+                                    )
+                                };
+
+                                let adjusted_mapping = unsafe {
+                                    Mapping {
+                                        addr: old_mapping.addr.byte_add(len),
+                                        len: old_mapping.len - len,
+                                        prot: old_mapping.prot,
+                                        name: old_mapping.name,
+                                        storage: Arc::new(adjusted_storage),
+                                        locked: old_mapping.locked,
+                                        mem_type: old_mapping.mem_type,
+                                    }
+                                };
+
+                                let new_mapping: Mapping = self
+                                    .alloc(addr, len, prot, name)
+                                    .map_err(|_| MmapError::NoMem(len))?;
+
+                                assert!(mappings.insert(addr, new_mapping.clone()).is_none());
+                                assert!(mappings.insert(addr + len, adjusted_mapping).is_none());
+                                drop(mappings);
+                                self.validate_mappings();
+
+                                return Ok(new_mapping);
+                            } else if mapping.end() as usize == addr + len {
+                                todo!()
+                                // let mapping_addr = mapping.addr as usize;
+                                // // we have one conflicting mapping and we're replacing the end
+                                // let old_mapping = mappings.remove(&mapping_addr).unwrap();
+                                // let old_storage = old_mapping.storage;
+
+                                // // intentionally leak the old storage to prevent deallocation
+                                // let _ = Arc::<dyn Storage>::into_raw(old_storage.clone());
+
+                                // let adjusted_storage = unsafe {
+                                //     Memory::raw(old_storage.ptr() as usize, old_mapping.len - len)
+                                // };
+
+                                // let adjusted_mapping = Mapping {
+                                //     addr: old_mapping.addr,
+                                //     len: old_mapping.len - len,
+                                //     prot: old_mapping.prot,
+                                //     name: old_mapping.name,
+                                //     storage: Arc::new(adjusted_storage),
+                                //     locked: old_mapping.locked,
+                                //     mem_type: old_mapping.mem_type,
+                                // };
+
+                                // let new_storage = DmemAllocation {
+                                //     phys_addr,
+                                //     len,
+                                //     mem_type,
+                                // };
+
+                                // self.dmem
+                                //     .native_dmem
+                                //     .map_overwrite(addr, len, prot, phys_addr)
+                                //     .ok_or(SysErr::Raw(ENOMEM))?;
+
+                                // let new_mapping = Mapping {
+                                //     addr: addr as _,
+                                //     len,
+                                //     prot,
+                                //     name: "dmem".to_string(),
+                                //     storage: Arc::new(new_storage),
+                                //     locked: false,
+                                //     mem_type: Some(mem_type),
+                                // };
+
+                                // assert!(mappings
+                                //     .insert(old_mapping.addr as usize, adjusted_mapping)
+                                //     .is_none());
+                                // assert!(mappings.insert(addr, new_mapping.clone()).is_none());
+                                // drop(mappings);
+                                // self.validate_mappings();
+
+                                // return Ok(new_mapping);
+                            } else {
+                                todo!("{:?}", mapping)
+                            }
+                        } else {
+                            todo!("map_fixed, free addr: {:#x}", v);
+                            todo!("{:?}", affected_mappings)
+                        }
                     }
                 }
             }
@@ -1905,7 +2205,13 @@ impl Vm {
 
     #[allow(unused_variables)]
     fn munmap_internal(self: &Arc<Self>, addr: usize, len: usize) -> Result<SysOut, SysErr> {
-        todo!()
+        warn!(
+            "munmap: addr {:#x}, len: {:#x} ({})",
+            addr,
+            len,
+            format_size(len, DECIMAL)
+        );
+        Ok(SysOut::ZERO)
     }
 
     fn sys_mprotect(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -2371,6 +2677,11 @@ impl Mapping {
     #[cfg(not(target_os = "linux"))]
     fn set_name(&self, _: *mut u8, _: usize, _: &CStr) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn is_void(&self) -> bool {
+        self.prot.is_empty()
+            && (((self.end() as usize) < 0x7_E000_0000) || (self.addr as usize > 0x7_F000_0000))
     }
 }
 

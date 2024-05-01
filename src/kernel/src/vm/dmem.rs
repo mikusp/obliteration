@@ -124,6 +124,42 @@ impl DmemInterface {
         );
         use std::os::fd::AsRawFd;
 
+        use libc::{c_void, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_SHARED};
+
+        use crate::info;
+
+        let ret = unsafe {
+            libc::mmap(
+                addr as *mut c_void,
+                len,
+                prot.into_host(),
+                MAP_SHARED | MAP_FIXED_NOREPLACE,
+                self.memfd.as_raw_fd(),
+                phys_addr.0 as i64,
+            )
+        };
+
+        if ret != libc::MAP_FAILED {
+            Some(ret as _)
+        } else {
+            todo!("mapping resulted in MAP_FAILED, looks like we messed up memory")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn map_overwrite(
+        &self,
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        phys_addr: PhysAddr,
+    ) -> Option<usize> {
+        info!(
+            "DmemInterface::map_overwrite({:#x}, {:#x}, {}, {:#x})",
+            addr, len, prot, phys_addr.0
+        );
+        use std::os::fd::AsRawFd;
+
         use libc::{c_void, MAP_FIXED, MAP_SHARED};
 
         use crate::info;

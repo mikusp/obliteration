@@ -24,6 +24,13 @@ pub(super) struct Memory {
 unsafe impl Send for Memory {}
 
 impl Memory {
+    pub unsafe fn raw(addr: usize, len: usize) -> Self {
+        Memory {
+            addr: addr as _,
+            len,
+        }
+    }
+
     #[cfg(unix)]
     pub fn new(addr: usize, len: usize) -> Result<Self, Error> {
         use libc::{mmap, MAP_ANON, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_NONE};
@@ -236,6 +243,13 @@ impl Drop for Memory {
     fn drop(&mut self) {
         use libc::munmap;
 
+        use crate::info;
+
+        info!(
+            "Memory::drop unmapping {:#x}-{:#x}",
+            self.addr as usize,
+            self.addr as usize + self.len
+        );
         if unsafe { munmap(self.addr as _, self.len) } < 0 {
             let e = Error::last_os_error();
             panic!("Failed to unmap {:p}:{}: {}.", self.addr, self.len, e);
