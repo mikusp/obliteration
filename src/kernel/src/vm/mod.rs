@@ -1795,11 +1795,8 @@ impl Vm {
                 }
 
                 let potential_conflicts = mappings.range(0x7_E000_0000..0x7_F000_0000);
-
                 for (_entry_addr, mapping) in potential_conflicts.rev() {
-                    if (start >= mapping.addr as usize && start < mapping.end() as usize)
-                        || (end >= mapping.addr as usize && end < mapping.end() as usize)
-                    {
+                    if (start <= mapping.end() as usize - 1) && (mapping.addr as usize) <= end - 1 {
                         // conflicting areas
                         end = end - 0x4000;
                         start = start - 0x4000;
