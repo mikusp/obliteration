@@ -8,6 +8,7 @@ use thiserror::Error;
 
 /// Implementation of `iovec` structure for writing.
 #[repr(C)]
+#[derive(Debug)]
 pub struct IoVec<'a> {
     ptr: *const u8,
     len: IoLen,
@@ -78,7 +79,7 @@ impl<'a> DerefMut for IoVecMut<'a> {
 
 /// Represents a length of [`IoVec`] and [`IoVecMut`].
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IoLen(usize);
 
 impl IoLen {

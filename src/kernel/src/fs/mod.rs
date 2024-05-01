@@ -1,16 +1,18 @@
 use crate::errno::{Errno, EBADF, EBUSY, EEXIST, EINVAL, ENAMETOOLONG, ENODEV, ENOENT, ESPIPE};
-use crate::info;
 use crate::process::{GetFileError, VThread};
 use crate::syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::PrivilegeError;
 use crate::ucred::{Privilege, Ucred};
-use bitflags::bitflags;
+use crate::{error, info, warn};
+use bitflags::{bitflags, Flags};
 use gmtx::{Gutex, GutexGroup};
 use macros::{vpath, Errno};
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::fmt::{Display, Formatter};
+use std::io::Read;
 use std::num::TryFromIntError;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -801,7 +803,7 @@ impl Fs {
 
         info!("Seeking fd {fd} with whence = {whence:?} and offset = {offset}.");
 
-        let file = td.proc().files().get(fd)?;
+        let mut file = td.proc().files().get(fd)?;
 
         if !file.is_seekable() {
             return Err(SysErr::Raw(ESPIPE));
@@ -810,8 +812,8 @@ impl Fs {
         // check vnode type
 
         match whence {
-            Whence::Set => {}
-            Whence::Current => todo!("lseek with whence = SEEK_CUR"),
+            Whence::Set => *file.offset_mut() = offset as u64,
+            Whence::Current => *file.offset_mut() += offset as u64,
             Whence::End => todo!(),
             Whence::Data => {
                 let _ = file.ioctl(IoCmd::FIOSEEKDATA(&mut offset), Some(td));
@@ -825,7 +827,9 @@ impl Fs {
             }
         }
 
-        todo!()
+        let final_offset = *file.offset_mut() as usize;
+
+        Ok(final_offset.into())
     }
 
     fn sys_truncate(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
