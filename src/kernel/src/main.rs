@@ -5,7 +5,7 @@ use crate::arch::MachDep;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::dev::{
     CameraManager, DceManager, DebugManager, DebugManagerInitError, DipswInitError, DipswManager,
-    DmemContainer, GcManager, HmdManager, RngManager, SblSrvManager, TtyManager,
+    DmemContainer, GcManager, HidManager, HmdManager, RngManager, SblSrvManager, TtyManager,
     TtyManagerInitError,
 };
 use crate::dmem::{DmemManager, DmemManagerInitError};
@@ -33,7 +33,8 @@ use crate::ucred::{AuthAttrs, AuthCaps, AuthInfo, AuthPaid, Gid, Ucred, Uid};
 use crate::umtx::UmtxManager;
 use clap::Parser;
 use dev::{
-    CameraInitError, DceInitError, GcInitError, HmdInitError, RngInitError, SblSrvInitError,
+    CameraInitError, DceInitError, GcInitError, HidInitError, HmdInitError, RngInitError,
+    SblSrvInitError,
 };
 use llt::{OsThread, SpawnError};
 use macros::vpath;
@@ -371,6 +372,8 @@ fn run() -> Result<(), KernelError> {
     let hmd_cmd = HmdManager::new()?;
     #[allow(unused_variables)] // TODO: Remove this when someone uses dce.
     let dce = DceManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses hid.
+    let hid = HidManager::new()?;
 
     // Initialize kernel components.
     #[allow(unused_variables)] // TODO: Remove this when someone uses debug.
@@ -653,6 +656,9 @@ enum KernelError {
 
     #[error("dce manager initialization failed")]
     DceManagerInitFailed(#[from] DceInitError),
+
+    #[error("hid manager initialization failed")]
+    HidManagerInitFailed(#[from] HidInitError),
 
     #[error("dmem manager initialization failed")]
     DmemManagerInitFailed(#[from] DmemManagerInitError),
