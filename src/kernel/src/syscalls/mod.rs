@@ -1,6 +1,6 @@
 use crate::errno::ENOSYS;
 use crate::process::VThread;
-use crate::warn;
+use crate::{info, warn};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 

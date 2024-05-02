@@ -16,8 +16,17 @@ impl NamedObjManager {
             warn!("stubbed sys_namedobj_delete");
             Ok(0.into())
         });
-        sys.register(601, &namedobj, |_, _, _| {
-            warn!("stubbed sys_mdbg_service");
+        sys.register(601, &namedobj, |_, _, i| {
+            let op = i.args[0].get();
+            warn!("stubbed sys_mdbg_service {:#x}", i.args[0].get());
+
+            if op == 0xA {
+                unsafe {
+                    info!("mdbg 0xA, writing 0");
+                    *(i.args[2].get() as *mut u32) = 0;
+                }
+            }
+
             Ok(0.into())
         });
 

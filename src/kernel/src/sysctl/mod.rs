@@ -4,9 +4,10 @@ use crate::errno::{
     EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOMEM, ENOTDIR, EOPNOTSUPP, EPERM, ESRCH,
 };
 use crate::process::VThread;
+use crate::rtld::Module;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::vm::Vm;
-use crate::warn;
+use crate::{info, warn};
 use std::any::Any;
 use std::cmp::min;
 use std::ptr::null_mut;
@@ -86,7 +87,9 @@ impl Sysctl {
     pub const KERN_RNGPSEUDO: i32 = 47;
     pub const KERN_PROC_APPINFO: i32 = 35;
     pub const KERN_PROC_SANITIZER: i32 = 41;
+    pub const KERN_PROC_CALLREC: i32 = 42;
     pub const KERN_PROC_PTC: i32 = 43;
+    pub const KERN_PROC_DYNLIB: i32 = 44;
     pub const MACHDEP_TSC_FREQ: i32 = 492;
 
     pub const VM_PS4DEV: i32 = 1;
@@ -384,6 +387,19 @@ impl Sysctl {
         Ok(())
     }
 
+    fn kern_proc_callrec(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed kern_proc_callrec");
+        req.write(&(0u32).to_ne_bytes())?;
+
+        Ok(())
+    }
+
     fn kern_proc_ptc(
         &self,
         _: &'static Oid,
@@ -400,6 +416,46 @@ impl Sysctl {
             Ordering::Relaxed,
         );
 
+        Ok(())
+    }
+
+    fn kern_dynlib_get_libkernel_text_segment(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed kern_dynlib_get_libkernel_text_segment");
+        let libkernel_text = req
+            .td
+            .proc()
+            .bin()
+            .as_ref()
+            .unwrap()
+            .list()
+            .filter(|m| {
+                let is_libkernel = m
+                    .names()
+                    .iter()
+                    .filter(|name| name.contains("libkernel"))
+                    .collect::<Vec<&String>>()
+                    .is_empty();
+
+                is_libkernel
+            })
+            .collect::<Vec<&Arc<Module>>>()
+            .first()
+            .and_then(|md| {
+                let text_segment_offset = md.memory().text_segment().start();
+
+                Some(text_segment_offset + md.memory().addr())
+            });
+
+        if let Some(addr) = libkernel_text {
+            info!("writing {:#x}", addr);
+            req.write(&addr.to_ne_bytes())?;
+        }
         Ok(())
     }
 
@@ -644,6 +700,7 @@ type Handler = fn(&Sysctl, &'static Oid, &Arg, usize, &mut SysctlReq) -> Result<
 //         └─── (1.14.35) KERN_PROC_APPINFO
 //         └─── ...
 //         └─── (1.14.41) KERN_PROC_SANITIZER
+//         └─── (1.14.42) KERN_PROC_CALLREC
 //         └─── ...
 //         └─── (1.13.43) KERN_PROC_PTC
 //         └─── ...
@@ -782,7 +839,7 @@ static KERN_PROC_APPINFO: Oid = Oid {
 
 static KERN_PROC_SANITIZER: Oid = Oid {
     parent: &KERN_PROC_CHILDREN,
-    link: Some(&KERN_PROC_PTC), // TODO: Use a proper value.
+    link: Some(&KERN_PROC_CALLREC), // TODO: Use a proper value.
     number: Sysctl::KERN_PROC_SANITIZER,
     kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_NODE,
     arg1: None, // TODO: This value on the PS4 is not null.
@@ -794,9 +851,26 @@ static KERN_PROC_SANITIZER: Oid = Oid {
     enabled: true,
 };
 
+static KERN_PROC_CALLREC: Oid = Oid {
+    parent: &KERN_PROC_CHILDREN,
+    link: Some(&KERN_PROC_PTC), // TODO: Use a proper value.
+    number: Sysctl::KERN_PROC_CALLREC,
+    kind: Sysctl::CTLFLAG_RW
+        | Sysctl::CTLFLAG_ANYBODY
+        | Sysctl::CTLFLAG_MPSAFE
+        | Sysctl::CTLTYPE_OPAQUE,
+    arg1: None,
+    arg2: 0,
+    name: "callrec",
+    handler: Some(Sysctl::kern_proc_callrec),
+    fmt: "N",
+    descr: "Function last call recored", // sic!
+    enabled: true,
+};
+
 static KERN_PROC_PTC: Oid = Oid {
     parent: &KERN_PROC_CHILDREN,
-    link: None, // TODO: Implement this.
+    link: Some(&KERN_PROC_DYNLIB),
     number: Sysctl::KERN_PROC_PTC,
     kind: Sysctl::CTLFLAG_RD
         | Sysctl::CTLFLAG_ANYBODY
@@ -808,6 +882,20 @@ static KERN_PROC_PTC: Oid = Oid {
     handler: Some(Sysctl::kern_proc_ptc),
     fmt: "LU",
     descr: "Process time counter",
+    enabled: true,
+};
+
+static KERN_PROC_DYNLIB: Oid = Oid {
+    parent: &KERN_PROC_CHILDREN,
+    link: None, // TODO: Implement this.
+    number: Sysctl::KERN_PROC_DYNLIB,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_NODE,
+    arg1: None,
+    arg2: 0,
+    name: "kern_dynlib_get_libkernel_text_segment",
+    handler: Some(Sysctl::kern_dynlib_get_libkernel_text_segment),
+    fmt: "N",
+    descr: "Sanitizing mode", // sic!
     enabled: true,
 };
 

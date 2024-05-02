@@ -318,7 +318,7 @@ impl Vm {
                 // let i = &w[0];
                 // let j = &w[1];
                 let j = j_.1;
-                info!("allocate: looking for space between {:?} and {:?}", i, j);
+                // info!("allocate: looking for space between {:?} and {:?}", i, j);
                 let start = i.phys_addr.0 + len;
                 let candidate = start
                     + (start as *const c_void).align_offset(if align == 0 {
@@ -1061,6 +1061,12 @@ impl Vm {
         len: usize,
         prot: Protections,
     ) -> Result<(), MemoryUpdateError> {
+        // info!(
+        //     "Vm::mprotect({:#x}-{:#x}, {})",
+        //     addr as usize,
+        //     addr as usize + len,
+        //     prot
+        // );
         if prot.bits() >= 0x10 {
             warn!(
                 "mprotect with GPU flags: {:#x}+{:#x} {}",

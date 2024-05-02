@@ -327,7 +327,7 @@ impl HostFile {
     }
 
     #[cfg(unix)]
-    fn stat(&self) -> Result<libc::stat, Error> {
+    pub fn stat(&self) -> Result<libc::stat, Error> {
         use libc::fstat;
 
         let mut stat = unsafe { zeroed() };

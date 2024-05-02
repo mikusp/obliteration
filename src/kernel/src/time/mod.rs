@@ -15,6 +15,7 @@ impl TimeManager {
         sys.register(116, &time, Self::sys_gettimeofday);
         sys.register(232, &time, Self::sys_clock_gettime);
         sys.register(234, &time, Self::sys_clock_getres);
+        sys.register(240, &time, Self::sys_nanosleep);
         sys.register(638, &time, Self::sys_utc_to_localtime);
 
         time
@@ -24,7 +25,7 @@ impl TimeManager {
         let tv: *mut TimeVal = i.args[0].into();
         let tz: *mut TimeZone = i.args[1].into();
 
-        info!("Getting the time of day");
+        // info!("Getting the time of day");
 
         if !tv.is_null() {
             unsafe {
@@ -48,7 +49,7 @@ impl TimeManager {
 
         let ts: *mut TimeSpec = i.args[1].into();
 
-        info!("Getting clock time with clock_id = {clock_id:?}");
+        // info!("Getting clock time with clock_id = {clock_id:?}");
 
         return Ok(SysOut::ZERO);
 
@@ -87,24 +88,36 @@ impl TimeManager {
 
         info!("Getting clock resolution with clock_id = {clock_id:?}");
 
-        if !ts.is_null() {
-            unsafe {
-                *ts = match clock_id {
-                    ClockId::REALTIME
-                    | ClockId::MONOTONIC
-                    | ClockId::UPTIME
-                    | ClockId::UPTIME_PRECISE
-                    | ClockId::UPTIME_FAST
-                    | ClockId::REALTIME_PRECISE
-                    | ClockId::REALTIME_FAST
-                    | ClockId::MONOTONIC_PRECISE
-                    | ClockId::MONOTONIC_FAST => todo!(),
-                    ClockId::VIRTUAL | ClockId::PROF => todo!(),
-                    ClockId::SECOND => TimeSpec { sec: 1, nsec: 0 },
-                    ClockId::THREAD_CPUTIME_ID => todo!(),
-                    _ => return Ok(SysOut::ZERO),
-                }
-            }
+        // if !ts.is_null() {
+        //     unsafe {
+        //         *ts = match clock_id {
+        //             ClockId::REALTIME
+        //             | ClockId::MONOTONIC
+        //             | ClockId::UPTIME
+        //             | ClockId::UPTIME_PRECISE
+        //             | ClockId::UPTIME_FAST
+        //             | ClockId::REALTIME_PRECISE
+        //             | ClockId::REALTIME_FAST
+        //             | ClockId::MONOTONIC_PRECISE
+        //             | ClockId::MONOTONIC_FAST => todo!(),
+        //             ClockId::VIRTUAL | ClockId::PROF => todo!(),
+        //             ClockId::SECOND => TimeSpec { sec: 1, nsec: 0 },
+        //             ClockId::THREAD_CPUTIME_ID => todo!(),
+        //             _ => return Ok(SysOut::ZERO),
+        //         }
+        //     }
+        // }
+
+        Ok(SysOut::ZERO)
+    }
+
+    fn sys_nanosleep(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let tsp: *const libc::timespec = i.args[0].into();
+        let rem: *mut libc::timespec = i.args[1].into();
+
+        info!("nanosleep");
+        unsafe {
+            libc::nanosleep(tsp, rem);
         }
 
         Ok(SysOut::ZERO)
@@ -228,8 +241,8 @@ impl TryFrom<i32> for ClockId {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TimeSpec {
-    sec: i64,
-    nsec: i64,
+    pub sec: i64,
+    pub nsec: i64,
 }
 
 impl TimeSpec {

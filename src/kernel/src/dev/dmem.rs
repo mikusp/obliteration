@@ -147,7 +147,7 @@ impl DeviceDriver for Dmem {
                     .vm()
                     .allocate_dmem(
                         alloc.start_or_phys_out,
-                        alloc.end,
+                        self.total_size,
                         alloc.len,
                         alloc.mem_type.try_into().unwrap(),
                         alloc.align,

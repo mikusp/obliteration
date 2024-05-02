@@ -1,7 +1,9 @@
 use super::file::HostFile;
 use super::{GetVnodeError, HostFs};
 use crate::errno::{Errno, EEXIST, EIO, ENOENT, ENOTDIR};
-use crate::fs::{Access, IoCmd, IoLen, IoVec, IoVecMut, Mode, Vnode, VnodeAttrs, VnodeType};
+use crate::fs::{
+    Access, IoCmd, IoLen, IoVec, IoVecMut, Mode, Stat, StatError, Vnode, VnodeAttrs, VnodeType,
+};
 use crate::process::VThread;
 use crate::ucred::{Gid, Uid};
 use macros::Errno;
@@ -135,6 +137,10 @@ impl crate::fs::VnodeBackend for VnodeBackend {
             Ok(v) => Ok(v),
             Err(e) => Err(Box::new(ReadError::ReadFailed(e))),
         }
+    }
+
+    fn stat(&self, #[allow(unused_variables)] vn: &Arc<Vnode>) -> Result<Stat, Box<dyn Errno>> {
+        self.file.stat().map(Stat::from_native).map_err(|_| todo!())
     }
 
     fn write(

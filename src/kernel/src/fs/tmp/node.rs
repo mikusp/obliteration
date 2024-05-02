@@ -212,6 +212,13 @@ impl crate::fs::VnodeBackend for VnodeBackend {
         todo!()
     }
 
+    fn stat(
+        &self,
+        #[allow(unused_variables)] vn: &Arc<Vnode>,
+    ) -> Result<crate::fs::Stat, Box<dyn Errno>> {
+        vn.stat()
+    }
+
     fn write(
         &self,
         vn: &Arc<Vnode>,

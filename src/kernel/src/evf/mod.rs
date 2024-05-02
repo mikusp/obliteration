@@ -1,4 +1,4 @@
-use crate::errno::{EACCES, ECANCELED, EINVAL, EPERM, ESRCH, ETIMEDOUT};
+use crate::errno::{EACCES, EBUSY, ECANCELED, EINVAL, EPERM, ESRCH, ETIMEDOUT};
 use crate::idt::Entry;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
@@ -97,6 +97,25 @@ impl EvfManager {
         let gnt = td.proc().gnt_mut();
         let existing = gnt.get(flag_name.into());
         match existing {
+            None if flag_name == "SceNpTusIpc_0000007b" => {
+                let flag = EventFlag::new(
+                    EventFlagAttr::EVF_PRIO_ORDER | EventFlagAttr::EVF_MULTI_THR,
+                    0,
+                );
+                let mut objects = td.proc().objects_mut();
+                let id = objects.alloc(Entry::new(
+                    Some(flag_name.into()),
+                    flag.clone(),
+                    EventFlag::ENTRY_TYPE,
+                ));
+
+                // fd_entry.set_ty(EventFlag::ENTRY_TYPE);
+                // fd_entry.set_name(Some(flag_name.into()));
+                // fd_entry.set_data(flag.clone());
+                drop(objects);
+
+                Ok(id.into())
+            }
             None => Err(SysErr::Raw(ESRCH)),
             Some(entry) => {
                 // todo!();
@@ -206,16 +225,95 @@ impl EvfManager {
     }
 
     fn sys_evf_try_wait(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-        let evf: usize = i.args[0].into();
+        let id: usize = i.args[0].into();
+        if id == !0 {
+            error!("try_wait -1");
+            return Ok(SysOut::ZERO);
+        }
+
+        let id = unsafe { i.args[0].to_str(0x20).ok().unwrap().unwrap() };
         let pattern: u64 = i.args[1].into();
         let wait_mode: u32 = i.args[2].try_into().unwrap();
         let result_pattern: *mut u64 = i.args[3].into();
 
-        info!(
+        todo!(
             "sys_evf_try_wait({}, {}, {}, {:#x})",
-            evf, pattern, wait_mode, result_pattern as usize
+            id,
+            pattern,
+            wait_mode,
+            result_pattern as usize
         );
-        todo!()
+
+        if pattern == 0 || wait_mode & 0x3 == 0 || wait_mode & 0x3 == 3 || wait_mode & 0x30 == 0x30
+        {
+            return Err(SysErr::Raw(EINVAL));
+        }
+
+        let objects = td.proc().objects();
+
+        todo!();
+        // let entry = objects
+        //     .get(id, Some(EventFlag::ENTRY_TYPE))
+        //     .ok_or(SysErr::Raw(ESRCH))?;
+
+        // let flag: &Arc<EventFlag> = &entry
+        //     .data()
+        //     .clone()
+        //     .downcast()
+        //     .expect("wrong type of named object");
+
+        // let mut queue = flag.waiting_threads.write();
+
+        // if !queue.is_empty() && flag.attr.intersects(EventFlagAttr::EVF_SINGLE_THR) {
+        //     return Err(SysErr::Raw(EPERM));
+        // }
+
+        // let wait_mode = EventFlagWaitMode::from_bits_retain(wait_mode);
+
+        // let mut pat = flag.pattern.write();
+
+        // let wait_condition_met = match wait_mode {
+        //     wm if wm.intersects(EventFlagWaitMode::EVF_WAITMODE_AND) => *pat & pattern == pattern,
+        //     wm if wm.intersects(EventFlagWaitMode::EVF_WAITMODE_OR) => *pat & pattern != 0,
+        //     _ => todo!("wt.wait_mode does not include neither AND nor OR"),
+        // };
+
+        // if wait_condition_met {
+        //     let cleared_val = match wait_mode {
+        //         wm if wm.intersects(EventFlagWaitMode::EVF_WAITMODE_CLEAR_ALL) => 0,
+        //         wm if wm.intersects(EventFlagWaitMode::EVF_WAITMODE_CLEAR_PAT) => *pat & !pattern,
+        //         _ => todo!("wt.wait_mode does not specify CLEAR condition"),
+        //     };
+
+        //     *pat = cleared_val;
+        //     // if let Some(arc) = wt.sync.upgrade() {
+        //     //     let (lock, cvar) = &*arc;
+        //     //     let mut matched = lock.lock().unwrap();
+        //     //     *matched = Some(EventFlagCondition::WaitConditionSatisfied(new_val));
+
+        //     //     info!("waking thread {:?} by evf", wt.td.id());
+        //     //     cvar.notify_one();
+        //     // }
+        //     return Ok(SysOut::ZERO);
+        // } else {
+        //     return Err(SysErr::Raw(EBUSY));
+        // }
+
+        // match *notified {
+        //     None => todo!(),
+        //     Some(EventFlagCondition::WaitConditionSatisfied(pat)) => {
+        //         if !result_pattern.is_null() {
+        //             unsafe {
+        //                 *result_pattern = pat;
+        //             }
+        //         }
+
+        //         return Ok(0.into());
+        //     }
+        //     Some(EventFlagCondition::EventFlagDeleted) => return Err(SysErr::Raw(EACCES)),
+        //     Some(EventFlagCondition::TimedOut) => return Err(SysErr::Raw(ETIMEDOUT)),
+        //     Some(EventFlagCondition::EventFlagCancelled) => return Err(SysErr::Raw(ECANCELED)),
+        // }
     }
 
     fn sys_evf_set(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {

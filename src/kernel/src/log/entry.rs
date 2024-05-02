@@ -9,7 +9,13 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
-    pub(super) fn new(stdout: Buffer, meta: LogMeta, time: Duration, tid: u64) -> Self {
+    pub(super) fn new(
+        stdout: Buffer,
+        meta: LogMeta,
+        time: Duration,
+        tid: u64,
+        thr_name: String,
+    ) -> Self {
         let mut e = Self {
             stdout: Some(stdout),
             plain: Vec::new(),
@@ -20,6 +26,7 @@ impl LogEntry {
         e.write_category(meta.category);
         e.write_time(time);
         e.write_tid(tid);
+        e.write_thread_name(thr_name);
         e.write_location(meta.file, meta.line);
         e.end_meta();
 
@@ -82,6 +89,16 @@ impl LogEntry {
 
         write!(stdout, ":{tid:#018x}").unwrap();
         write!(self.plain, ":{tid:#018x}").unwrap();
+    }
+
+    fn write_thread_name(&mut self, name: String) {
+        let stdout = match self.stdout.as_mut() {
+            Some(v) => v,
+            None => return,
+        };
+
+        write!(stdout, ":{name}").unwrap();
+        write!(self.plain, ":{name}").unwrap();
     }
 
     fn write_location(&mut self, file: Option<&str>, line: Option<u32>) {

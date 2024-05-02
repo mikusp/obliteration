@@ -180,6 +180,9 @@ commands! {
         /// Unmap compute queue
         GCUNMAPCOMPUTEQUEUE(&mut Unknown12) = 0xc00c810e,
 
+        /// Hid unknown
+        HIDUNK1(&Unknown12) = 0x800c4802,
+
         /// Get genuine random
         RNGGETGENUINE(&mut RngInput) = 0x40445301,
         /// Fips186Prng

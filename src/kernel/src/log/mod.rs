@@ -77,8 +77,9 @@ impl Logger {
     pub fn entry(&self, meta: LogMeta) -> LogEntry {
         let time = Instant::now() - self.start_time;
         let tid = Self::current_thread();
+        let thr_name = Self::current_thread_name();
 
-        LogEntry::new(self.stdout.buffer(), meta, time, tid)
+        LogEntry::new(self.stdout.buffer(), meta, time, tid, thr_name)
     }
 
     pub fn write(&self, e: LogEntry) {
@@ -102,6 +103,23 @@ impl Logger {
     #[cfg(target_os = "linux")]
     fn current_thread() -> u64 {
         unsafe { libc::gettid().try_into().unwrap() }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_thread_name() -> String {
+        unsafe {
+            let mut name_buf = ['0'; 16];
+            if libc::pthread_getname_np(
+                libc::pthread_self(),
+                name_buf.as_mut_ptr() as _,
+                name_buf.len(),
+            ) != 0
+            {
+                "unknown".to_string()
+            } else {
+                String::from_iter(name_buf.iter())
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

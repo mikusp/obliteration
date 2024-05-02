@@ -4,6 +4,7 @@ use self::resolver::{ResolveFlags, SymbolResolver};
 use crate::budget::ProcType;
 use crate::ee::native::{NativeEngine, SetupModuleError};
 use crate::errno::{Errno, EINVAL, ENOENT, ENOEXEC, ENOMEM, EPERM, ESRCH};
+use crate::error;
 use crate::fs::VFileFlags;
 use crate::fs::{Fs, OpenError, VPath, VPathBuf};
 use crate::idt::Entry;
@@ -555,9 +556,10 @@ impl RuntimeLinker {
         // TODO: It looks like the PS4 check if this get called from a browser. The problem is this
         // check has been patched when jailbreaking so we need to see the original code before
         // implement this.
-        let name = match VPath::new(unsafe { i.args[0].to_str(1024)?.unwrap() }) {
+        let str = unsafe { i.args[0].to_str(1024)?.unwrap() };
+        let name = match VPath::new(str) {
             Some(v) => v,
-            None => todo!("sys_dynlib_load_prx with relative path"),
+            None => todo!("sys_dynlib_load_prx with relative path {}", str),
         };
 
         if td.proc().budget_ptype() == ProcType::BigApp {
@@ -897,7 +899,9 @@ impl RuntimeLinker {
 
             // TODO: Check what relocate_text_or_data_segment on the PS4 is doing.
             unsafe { write_unaligned(target.as_mut_ptr().cast(), value) };
-
+            // if md.names().contains(&"libc.prx".to_string()) {
+            //     error!("val {:#x}", value);
+            // }
             relocated[i] = Some(how);
         }
 
@@ -1125,10 +1129,11 @@ impl RuntimeLinker {
         unsafe {
             *out = match ty {
                 1..=4 | 7 => todo!("sys_dynlib_get_obj_member: with ty = {ty}"),
-                8 => module
+                8 if module.mod_param().is_some() => module
                     .mod_param()
                     .map(|param| module.memory().addr() + param)
                     .expect("No mod param"),
+                8 => 0,
                 _ => return Err(SysErr::Raw(EINVAL)),
             }
         }
@@ -1146,13 +1151,11 @@ impl RuntimeLinker {
         ];
 
         for (lib_name, fixes) in values.iter() {
-            info!("module names: {:?}", md.names());
             if md.names().contains(&lib_name.to_string()) {
                 unsafe {
                     for (offset, val) in fixes.iter() {
                         let mem_addr = md.memory().addr() + md.memory().base() + offset;
                         *(mem_addr as *mut std::ffi::c_int) = *val;
-                        info!("patched {}", lib_name);
                     }
                 }
             }

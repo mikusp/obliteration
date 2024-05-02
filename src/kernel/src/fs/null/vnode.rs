@@ -94,6 +94,16 @@ impl crate::fs::VnodeBackend for VnodeBackend {
         }
     }
 
+    fn stat(
+        &self,
+        #[allow(unused_variables)] vn: &Arc<Vnode>,
+    ) -> Result<crate::fs::Stat, Box<dyn Errno>> {
+        match self.lower.stat() {
+            Ok(v) => Ok(v),
+            Err(e) => Err(Box::new(StatError::StatFromLowerFailed(e))),
+        }
+    }
+
     fn write(
         &self,
         vn: &Arc<Vnode>,
@@ -167,6 +177,12 @@ pub(super) enum NodeGetError {}
 enum ReadError {
     #[error("read from lower vnode failed")]
     ReadFromLowerFailed(#[source] Box<dyn Errno>),
+}
+
+#[derive(Debug, Error, Errno)]
+enum StatError {
+    #[error("stat from lower vnode failed")]
+    StatFromLowerFailed(#[source] Box<dyn Errno>),
 }
 
 #[derive(Debug, Error, Errno)]

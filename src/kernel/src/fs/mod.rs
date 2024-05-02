@@ -10,7 +10,8 @@ use macros::{vpath, Errno};
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::fmt::{Display, Formatter};
-use std::io::Read;
+use std::io::{Error, Read};
+use std::mem::zeroed;
 use std::num::TryFromIntError;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -436,7 +437,7 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            warn!("open({path}) with flags & O_TRUNC");
         } else if flags.intersects(OpenFlags::O_CREAT) {
             let mode: i64 = i.args[2].try_into().unwrap();
             todo!("open({path}, {flags}) with mode = {mode:#x}");
@@ -469,6 +470,9 @@ impl Fs {
 
     fn sys_ioctl(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let fd: i32 = i.args[0].try_into().unwrap();
+        let arg1: u64 = i.args[1].into();
+        let arg2: usize = i.args[2].into();
+        info!("ioctl {}, {:#x}, {:#x}", fd, arg1, arg2);
         // Our IoCmd contains both the command and the argument (if there is one).
         let cmd = IoCmd::try_from_raw_parts(i.args[1].into(), i.args[2].into())?;
 
@@ -481,7 +485,7 @@ impl Fs {
 
     /// See `kern_ioctl` on the PS4 for a reference.
     fn ioctl(self: &Arc<Self>, fd: i32, cmd: IoCmd, td: &VThread) -> Result<SysOut, IoctlError> {
-        let file = td.proc().files().get(fd)?;
+        let mut file = td.proc().files().get(fd)?;
 
         if !file
             .flags()
@@ -559,7 +563,17 @@ impl Fs {
         let iovec: *const IoVec = i.args[1].into();
         let iovcnt: u32 = i.args[2].try_into().unwrap();
 
-        todo!()
+        if fd == 0 {
+            let mut written = 0;
+            for i in unsafe { std::slice::from_raw_parts(iovec, iovcnt as usize) } {
+                info!("{}", std::str::from_utf8(i.deref()).unwrap());
+                written += i.len().get();
+            }
+
+            Ok(written.into())
+        } else {
+            todo!()
+        }
     }
 
     fn writev(&self, fd: i32, td: &VThread) -> Result<usize, SysErr> {
@@ -787,7 +801,28 @@ impl Fs {
         td: &VThread,
     ) -> Result<Stat, StatError> {
         // TODO: this will need lookup from a start dir
-        todo!()
+        info!("statat({:?}, {:?}, {})", flags, dirat, path.as_ref());
+        match dirat {
+            At::Fd(fd) => {
+                let file = td.proc().files().get(fd)?;
+
+                let stat = file.backend().stat(file.as_ref(), Some(td))?;
+
+                return Ok(stat);
+            }
+            At::Cwd => {
+                // hacky
+                let mut stat = unsafe { zeroed() };
+
+                if unsafe { libc::stat(path.as_ref().as_ptr() as _, &mut stat) } < 0 {
+                    return Err(StatError::StatFailed(Error::last_os_error()));
+                } else {
+                    let st = Stat::from_native(stat);
+
+                    return Ok(st);
+                }
+            }
+        };
     }
 
     fn sys_mkdir(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -803,7 +838,8 @@ impl Fs {
         let nfds: u32 = i.args[1].try_into().unwrap();
         let timeout: i32 = i.args[2].try_into().unwrap();
 
-        todo!()
+        error!("sys_poll({:#x}, {}, {:#x})", fds as usize, nfds, timeout);
+        Ok((nfds as usize).into())
     }
 
     fn sys_lseek(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -823,12 +859,17 @@ impl Fs {
             return Err(SysErr::Raw(ESPIPE));
         }
 
+        let mut file_offset = file.offset_mut();
+
         // check vnode type
 
         match whence {
-            Whence::Set => *file.offset_mut() = offset as u64,
-            Whence::Current => *file.offset_mut() += offset as u64,
-            Whence::End => todo!(),
+            Whence::Set => *file_offset = offset as u64,
+            Whence::Current => *file_offset += offset as u64,
+            Whence::End => {
+                let stat = file.stat(Some(td))?;
+                *file_offset = (stat.size - offset) as u64;
+            }
             Whence::Data => {
                 let _ = file.ioctl(IoCmd::FIOSEEKDATA(&mut offset), Some(td));
 
@@ -841,7 +882,7 @@ impl Fs {
             }
         }
 
-        let final_offset = *file.offset_mut() as usize;
+        let final_offset = *file_offset as usize;
 
         Ok(final_offset.into())
     }
@@ -908,6 +949,8 @@ impl Fs {
         td: Option<&VThread>,
     ) -> Result<SysOut, SysErr> {
         // This will require relative lookups
+        info!("mkdirat({:?}, {}, {})", at, path, mode);
+
         todo!()
     }
 
@@ -1064,6 +1107,7 @@ impl TryFrom<i32> for Whence {
 }
 
 bitflags! {
+    #[derive(Debug)]
     /// Flags for *at() syscalls.
     struct AtFlags: i32 {
         const SYMLINK_NOFOLLOW = 0x200;
@@ -1259,6 +1303,10 @@ pub enum StatError {
 
     #[error("failed to get file attr")]
     GetAttrError(#[from] Box<dyn Errno>),
+
+    #[error("stat failed")]
+    #[errno(EINVAL)]
+    StatFailed(#[source] std::io::Error),
 }
 
 #[derive(Debug, Error, Errno)]

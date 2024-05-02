@@ -1,3 +1,5 @@
+use gmtx::{Gutex, GutexGroup};
+
 use crate::budget::BudgetType;
 use crate::errno::Errno;
 use crate::fs::{
@@ -7,6 +9,7 @@ use crate::process::{FileDesc, VThread};
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::time::TimeSpec;
 use crate::{error, info, warn};
+use std::any::Any;
 use std::convert::Infallible;
 use std::ptr;
 use std::sync::{Arc, Weak};
@@ -20,6 +23,10 @@ impl KernelQueueManager {
         sys.register(141, &kq, Self::sys_kqueueex);
         sys.register(362, &kq, Self::sys_kqueue);
         sys.register(363, &kq, Self::sys_kevent);
+        sys.register(392, &kq, |_, _, _| {
+            error!("stubbed sys_uuidgen");
+            Ok(SysOut::ZERO)
+        });
 
         kq
     }
@@ -51,7 +58,7 @@ impl KernelQueueManager {
         Ok(fd.into())
     }
 
-    fn sys_kevent(self: &Arc<Self>, _td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    fn sys_kevent(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let kq: usize = i.args[0].into();
         let changelist: *const Kevent = i.args[1].into();
         let nchanges: i32 = i.args[2].try_into().unwrap();
@@ -59,40 +66,70 @@ impl KernelQueueManager {
         let nevents: i32 = i.args[4].try_into().unwrap();
         let timeout: *const TimeSpec = i.args[5].into();
 
-        let fd = (kq & 0xffffffff) as u32;
+        let fd = (kq & 0xffffffff) as i32;
         let obj = (kq >> 0x20) as u32;
 
-        info!(
-            "sys_kevent({} ({}), {:#x}, {}, {:#x}, {}, {:#x})",
-            fd, obj, changelist as usize, nchanges, eventlist as usize, nevents, timeout as usize
-        );
+        // info!(
+        //     "sys_kevent({} ({}), {:#x}, {}, {:#x}, {}, {:#x})",
+        //     fd, obj, changelist as usize, nchanges, eventlist as usize, nevents, timeout as usize
+        // );
 
         let changes = unsafe { std::slice::from_raw_parts(changelist, nchanges as _) };
 
-        info!("changes: {:?}", changes);
+        // info!("changes: {:?}", changes);
+
+        let file = td.proc().files().get(fd)?;
+
+        let kqueue: &FileBackend = (file.backend().as_ref() as &dyn Any)
+            .downcast_ref()
+            .unwrap();
+
+        let mut events = kqueue.0.events.write();
+
+        for c in changes {
+            events.push(c.clone())
+        }
 
         if nevents == 0 {
             return Ok(SysOut::ZERO);
         }
 
         if timeout != ptr::null() {
-            warn!("kevent: stubbed elapsed timeout");
-            return Ok(SysOut::ZERO);
+            // warn!("kevent: stubbed elapsed timeout");
+            // return Ok(SysOut::ZERO);
         }
 
-        todo!()
+        let events_to_write = events
+            .iter()
+            .cloned()
+            .take(nevents as _)
+            .collect::<Vec<Kevent>>();
+        // unsafe { ptr::copy(events_to_write.as_ptr(), eventlist, events_to_write.len()) }
+        if !events_to_write.is_empty() {
+            for n in (0u64)..(nevents as _) {
+                // info!("writing {:?}", events_to_write.first());
+                unsafe { ptr::copy(events_to_write.as_ptr(), eventlist.add((n as usize)), 1) };
+            }
+            Ok(nevents.into())
+        } else {
+            Ok(SysOut::ZERO)
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct KernelQueue {
     filedesc: Weak<FileDesc>,
+    events: Gutex<Vec<Kevent>>,
 }
 
 impl KernelQueue {
     pub fn new(filedesc: &Arc<FileDesc>) -> Arc<Self> {
+        let gg = GutexGroup::new();
+
         Arc::new(KernelQueue {
             filedesc: Arc::downgrade(filedesc),
+            events: gg.spawn(vec![]),
         })
     }
 }
@@ -130,7 +167,7 @@ impl crate::fs::FileBackend for FileBackend {
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Kevent {
     ident: usize,
     filter: i16,

@@ -1,6 +1,7 @@
 use super::MapError;
 use crate::fs::VFile;
 use crate::imgact::orbis::{Elf, ProgramFlags, ProgramType};
+use crate::info;
 use crate::process::VProc;
 use crate::vm::{MappingFlags, MemoryUpdateError, Protections};
 use gmtx::{Gutex, GutexGroup, GutexWriteGuard};
@@ -297,7 +298,7 @@ impl Memory {
         let seg = &self.segments[seg];
         let ptr = self.ptr.add(seg.start);
         let len = seg.len;
-        let prot = Protections::CPU_READ | Protections::CPU_WRITE;
+        let prot = Protections::CPU_READ | Protections::CPU_WRITE | Protections::CPU_EXEC;
 
         if let Err(e) = self.proc.vm().mprotect(ptr, len, prot) {
             return Err(UnprotectSegmentError::MprotectFailed(
@@ -332,7 +333,7 @@ impl Memory {
         }
 
         // Unprotect the memory.
-        let prot = Protections::CPU_READ | Protections::CPU_WRITE;
+        let prot = Protections::CPU_READ | Protections::CPU_WRITE | Protections::CPU_EXEC;
 
         if let Err(e) = self.proc.vm().mprotect(self.ptr, end, prot) {
             return Err(UnprotectError::MprotectFailed(self.ptr as _, end, prot, e));
@@ -434,6 +435,10 @@ impl<'a> AsMut<[u8]> for UnprotectedSegment<'a> {
 
 impl<'a> Drop for UnprotectedSegment<'a> {
     fn drop(&mut self) {
+        // info!(
+        //     "UnprotectedSegment::drop({:#x}, {})",
+        //     self.ptr as usize, self.prot
+        // );
         self.proc
             .vm()
             .mprotect(self.ptr, self.len, self.prot)
@@ -455,8 +460,12 @@ impl<'a> Drop for UnprotectedMemory<'a> {
             if s.program().is_none() {
                 break;
             }
-
             let addr = unsafe { self.ptr.add(s.start()) };
+            // info!(
+            //     "UnprotectedMemory::drop({:#x}, {})",
+            //     addr as usize,
+            //     s.prot()
+            // );
 
             self.proc.vm().mprotect(addr, s.len(), s.prot()).unwrap();
         }
