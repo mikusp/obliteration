@@ -41,6 +41,7 @@ use macros::vpath;
 use param::Param;
 use serde::Deserialize;
 use std::error::Error;
+use std::ffi::CString;
 use std::fs::{create_dir_all, remove_dir_all, File};
 use std::io::Write;
 use std::path::PathBuf;
@@ -491,6 +492,8 @@ fn run() -> Result<(), KernelError> {
     // TODO: Check how this constructed.
     let stack = proc.vm().stack();
     let main: OsThread = unsafe { main.start(stack.start(), stack.len(), entry) }?;
+    let name = CString::new("main").unwrap();
+    unsafe { libc::pthread_setname_np(main, name.as_ptr() as _) };
 
     // Begin Discord Rich Presence before blocking current thread.
     if let Err(e) = discord_presence(&param) {

@@ -77,8 +77,9 @@ impl Logger {
     pub fn entry(&self, meta: LogMeta) -> LogEntry {
         let time = Instant::now() - self.start_time;
         let tid = Self::current_thread();
+        let thr_name = Self::current_thread_name();
 
-        LogEntry::new(self.stdout.buffer(), meta, time, tid)
+        LogEntry::new(self.stdout.buffer(), meta, time, tid, thr_name)
     }
 
     pub fn write(&self, e: LogEntry) {
@@ -102,6 +103,14 @@ impl Logger {
     #[cfg(target_os = "linux")]
     fn current_thread() -> u64 {
         unsafe { libc::gettid().try_into().unwrap() }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_thread_name() -> String {
+        std::fs::read_to_string(format!("/proc/self/task/{}/comm", Self::current_thread()))
+            .unwrap_or("unknown".to_string())
+            .trim()
+            .to_string()
     }
 
     #[cfg(target_os = "macos")]
