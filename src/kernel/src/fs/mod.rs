@@ -848,7 +848,8 @@ impl Fs {
         let nfds: u32 = i.args[1].try_into().unwrap();
         let timeout: i32 = i.args[2].try_into().unwrap();
 
-        todo!()
+        error!("sys_poll({:#x}, {}, {:#x})", fds as usize, nfds, timeout);
+        Ok((nfds as usize).into())
     }
 
     fn sys_lseek(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
