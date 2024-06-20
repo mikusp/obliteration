@@ -88,6 +88,9 @@ macro_rules! commands {
 
 commands! {
     pub enum IoCmd {
+        /// Ajm commands
+        AJMUNK1(&mut Unknown40) = 0xC0288903,
+
         /// sceKernelMemoryPoolExpand
         BPOOLEXPAND(&mut BlockpoolExpandArgs) = 0xC020A801,
         /// sceKernelMemoryPoolGetBlockStats

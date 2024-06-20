@@ -1,3 +1,4 @@
+pub use ajm::*;
 pub use camera::*;
 pub use dce::*;
 pub use deci::*;
@@ -11,6 +12,7 @@ pub use rng::*;
 pub use sbl_srv::*;
 pub use ttyconsole::*;
 
+mod ajm;
 mod camera;
 mod dce;
 mod deci;
