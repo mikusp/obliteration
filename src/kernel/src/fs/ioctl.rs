@@ -186,6 +186,9 @@ commands! {
         /// Geom unknown
         GEOMUNK1(&Unknown64) = 0x80404702,
 
+        /// Hid unknown
+        HIDUNK1(&Unknown12) = 0x800c4802,
+
         /// Icc unknown
         ICCCONFUNK1(&mut Unknown2) = 0xc0029203,
         ICCCONFUNK2(&Unknown2) = 0x80029204,
@@ -211,7 +214,9 @@ type Unknown2 = Unknown<2>;
 type Unknown8 = Unknown<8>;
 type Unknown12 = Unknown<12>;
 type Unknown16 = Unknown<16>;
+type Unknown24 = Unknown<24>;
 type Unknown36 = Unknown<36>;
+type Unknown40 = Unknown<40>;
 type Unknown48 = Unknown<48>;
 type Unknown64 = Unknown<64>;
 type Unknown132 = Unknown<132>;

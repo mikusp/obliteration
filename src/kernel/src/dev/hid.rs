@@ -7,6 +7,7 @@ use crate::fs::{
 };
 use crate::process::VThread;
 use crate::ucred::{Gid, Uid};
+use crate::warn;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -37,7 +38,12 @@ impl DeviceDriver for Hid {
         cmd: IoCmd,
         td: Option<&VThread>,
     ) -> Result<(), Box<dyn Errno>> {
-        todo!()
+        match cmd {
+            IoCmd::HIDUNK1(_) => warn!("ignoring HIDUNK1"),
+            _ => todo!(),
+        }
+
+        Ok(())
     }
 }
 
