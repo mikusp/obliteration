@@ -170,6 +170,7 @@ impl Vm {
         sys.register(572, &mm, Self::sys_virtual_query);
         sys.register(588, &mm, Self::sys_mname);
         sys.register(628, &mm, Self::sys_mmap_dmem);
+        sys.register(671, &mm, Self::sys_get_page_table_stats);
 
         Ok(mm)
     }
@@ -2656,6 +2657,16 @@ impl Vm {
         let i = unsafe { i.assume_init() };
 
         (i.dwPageSize as usize, i.dwAllocationGranularity as usize)
+    }
+
+    fn sys_get_page_table_stats(
+        self: &Arc<Self>,
+        td: &VThread,
+        i: &SysIn,
+    ) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_get_page_table_stats");
+
+        Ok(SysOut::ZERO)
     }
 }
 
