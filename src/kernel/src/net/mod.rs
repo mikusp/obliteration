@@ -37,6 +37,19 @@ impl NetManager {
         sys.register(113, &net, Self::sys_socketex);
         sys.register(114, &net, Self::sys_socketclose);
         sys.register(118, &net, Self::sys_getsockopt);
+        sys.register(125, &net, |_, _, i| {
+            let arg0: usize = i.args[0].into();
+            let arg1: usize = i.args[1].into();
+            let arg2: usize = i.args[2].into();
+            let arg3: usize = i.args[3].into();
+            let arg4: usize = i.args[4].into();
+            let arg5: usize = i.args[5].into();
+            warn!(
+                "stubbed sys_netgetiflist({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+                arg0, arg1, arg2, arg3, arg4, arg5
+            );
+            Ok(SysOut::ZERO)
+        });
         sys.register(133, &net, Self::sys_sendto);
 
         net
