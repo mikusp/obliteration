@@ -10,7 +10,8 @@ use macros::{vpath, Errno};
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::fmt::{Display, Formatter};
-use std::io::Read;
+use std::io::{Error, Read};
+use std::mem::zeroed;
 use std::num::TryFromIntError;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -801,7 +802,28 @@ impl Fs {
         td: &VThread,
     ) -> Result<Stat, StatError> {
         // TODO: this will need lookup from a start dir
-        todo!()
+        info!("statat({:?}, {:?}, {})", flags, dirat, path.as_ref());
+        match dirat {
+            At::Fd(fd) => {
+                let file = td.proc().files().get(fd)?;
+
+                let stat = file.backend().stat(file.as_ref(), Some(td))?;
+
+                return Ok(stat);
+            }
+            At::Cwd => {
+                // hacky
+                let mut stat = unsafe { zeroed() };
+
+                if unsafe { libc::stat(path.as_ref().as_ptr() as _, &mut stat) } < 0 {
+                    return Err(StatError::StatFailed(Error::last_os_error()));
+                } else {
+                    let st = Stat::from_native(stat);
+
+                    return Ok(st);
+                }
+            }
+        };
     }
 
     fn sys_rename(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
@@ -846,12 +868,17 @@ impl Fs {
             return Err(SysErr::Raw(ESPIPE));
         }
 
+        let mut file_offset = file.offset_mut();
+
         // check vnode type
 
         match whence {
-            Whence::Set => *file.offset_mut() = offset as u64,
-            Whence::Current => *file.offset_mut() += offset as u64,
-            Whence::End => todo!(),
+            Whence::Set => *file_offset = offset as u64,
+            Whence::Current => *file_offset += offset as u64,
+            Whence::End => {
+                let stat = file.stat(Some(td))?;
+                *file_offset = (stat.size - offset) as u64;
+            }
             Whence::Data => {
                 let _ = file.ioctl(IoCmd::FIOSEEKDATA(&mut offset), Some(td));
 
@@ -864,7 +891,7 @@ impl Fs {
             }
         }
 
-        let final_offset = *file.offset_mut() as usize;
+        let final_offset = *file_offset as usize;
 
         Ok(final_offset.into())
     }
@@ -1289,6 +1316,10 @@ pub enum StatError {
 
     #[error("failed to get file attr")]
     GetAttrError(#[from] Box<dyn Errno>),
+
+    #[error("stat failed")]
+    #[errno(EINVAL)]
+    StatFailed(#[source] std::io::Error),
 }
 
 #[derive(Debug, Error, Errno)]
