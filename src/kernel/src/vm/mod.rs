@@ -321,7 +321,7 @@ impl Vm {
                 // let i = &w[0];
                 // let j = &w[1];
                 let j = j_.1;
-                info!("allocate: looking for space between {:?} and {:?}", i, j);
+
                 let start = i.phys_addr.0 + len;
                 let candidate = start
                     + (start as *const c_void).align_offset(if align == 0 {
@@ -1532,8 +1532,8 @@ impl Vm {
                     continue;
                 } else {
                     // conflicting areas
-                    start = Self::round_page(start + mapping.len);
-                    end = Self::round_page(end + mapping.len);
+                    start = Self::round_page(mapping.addr as usize + mapping.len);
+                    end = Self::round_page(start + len);
                     continue 'outer;
                 }
             }
@@ -1653,7 +1653,7 @@ impl Vm {
                                 };
 
                                 let new_mapping: Mapping = self
-                                    .alloc(addr, len, prot, name)
+                                    .alloc_replace(addr, len, prot, name)
                                     .map_err(|_| MmapError::NoMem(len))?;
 
                                 assert!(mappings.insert(addr, new_mapping.clone()).is_none());
@@ -2069,7 +2069,44 @@ impl Vm {
             panic!("unaligned addr in alloc {:#x}", addr);
         }
 
-        let storage = Memory::new(addr, len)?;
+        let storage = Memory::new(addr, len, false)?;
+        let addr = storage.ptr();
+
+        storage.commit(addr, len, prot)?;
+
+        // Set storage name if supported.
+
+        let mapping = Mapping {
+            addr,
+            len,
+            prot,
+            name: name.clone(),
+            storage: Arc::new(storage),
+            locked: false,
+            mem_type: None,
+        };
+
+        if let Ok(name) = CString::new(name.as_str()) {
+            let _ = mapping.set_name(addr, len, &name);
+        }
+
+        Ok(mapping)
+    }
+
+    fn alloc_replace(
+        &self,
+        addr: usize,
+        len: usize,
+        prot: Protections,
+        name: String,
+    ) -> Result<Mapping, std::io::Error> {
+        use self::storage::Memory;
+
+        if addr & 0x3fff != 0 {
+            panic!("unaligned addr in alloc {:#x}", addr);
+        }
+
+        let storage = Memory::new(addr, len, true)?;
         let addr = storage.ptr();
 
         storage.commit(addr, len, prot)?;

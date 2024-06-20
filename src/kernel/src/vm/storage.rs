@@ -32,15 +32,23 @@ impl Memory {
     }
 
     #[cfg(unix)]
-    pub fn new(addr: usize, len: usize) -> Result<Self, Error> {
-        use libc::{mmap, MAP_ANON, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_NONE};
+    pub fn new(addr: usize, len: usize, replace: bool) -> Result<Self, Error> {
+        use libc::{
+            mmap, MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_FIXED_NOREPLACE, MAP_PRIVATE, PROT_NONE,
+        };
 
         let addr = unsafe {
             mmap(
                 addr as _,
                 len,
                 PROT_NONE,
-                MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE,
+                MAP_PRIVATE
+                    | MAP_ANON
+                    | (if replace {
+                        MAP_FIXED
+                    } else {
+                        MAP_FIXED_NOREPLACE
+                    }),
                 -1,
                 0,
             )
