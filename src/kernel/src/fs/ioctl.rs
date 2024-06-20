@@ -134,6 +134,8 @@ commands! {
         DMEMALLOCMAIN(&mut DmemAllocate) = 0xC0288011,
         /// Query direct memory
         DMEMQUERY(&DmemQuery) = 0x80288012,
+        /// Set PRT aperture
+        DMEMSETPRT(&PrtAperture) = 0x80188008,
 
         /// Set close on exec on fd.
         FIOCLEX = 0x20006601,

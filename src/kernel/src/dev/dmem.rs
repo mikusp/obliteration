@@ -1,5 +1,6 @@
 use crate::{
     errno::{Errno, EACCES, EINVAL, EPERM},
+    error,
     fs::{CharacterDevice, DeviceDriver, IoCmd},
     info,
     process::VThread,
@@ -193,6 +194,7 @@ impl DeviceDriver for Dmem {
                     }
                 }
             }
+            IoCmd::DMEMSETPRT(_) => error!("stubbed dmemsetprt"),
             _ => todo!(),
         }
 
