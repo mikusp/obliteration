@@ -12,6 +12,7 @@ pub use random::*;
 pub use rng::*;
 pub use sbl_srv::*;
 pub use ttyconsole::*;
+pub use urandom::*;
 
 mod ajm;
 mod camera;
@@ -27,3 +28,4 @@ mod random;
 mod rng;
 mod sbl_srv;
 mod ttyconsole;
+mod urandom;
