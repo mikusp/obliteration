@@ -321,6 +321,31 @@ fn run() -> Result<(), KernelError> {
         return Err(KernelError::MountFailed(app, e));
     }
 
+    // TODO: Check permission of /mnt/sandbox/CUSAXXXXX_000/<SYSTEM_PATH>/common on the PS4.
+    let priv_path = system_path.join("priv").unwrap();
+
+    if let Err(e) = fs.mkdir(&priv_path, 0o555, None) {
+        return Err(KernelError::CreateDirectoryFailed(priv_path, e));
+    }
+
+    // TODO: Check permission of /mnt/sandbox/CUSAXXXXX_000/<SYSTEM_PATH>/common/lib on the PS4.
+    let priv_lib_path = priv_path.join("lib").unwrap();
+
+    if let Err(e) = fs.mkdir(&priv_lib_path, 0o555, None) {
+        return Err(KernelError::CreateDirectoryFailed(priv_lib_path, e));
+    }
+
+    // TODO: Get mount options from the PS4.
+    let mut opts = MountOpts::new();
+
+    opts.insert("fstype", "nullfs");
+    opts.insert("fspath", priv_lib_path);
+    opts.insert("target", vpath!("/system/priv/lib").to_owned());
+
+    if let Err(e) = fs.mount(opts, MountFlags::empty(), None) {
+        return Err(KernelError::MountFailed(app, e));
+    }
+
     // TODO: Check permission of /mnt/sandbox/pfsmnt/CUSAXXXXX-app0-patch0-union on the PS4.
     let path: VPathBuf = format!("/mnt/sandbox/pfsmnt/{}-app0-patch0-union", param.title_id())
         .try_into()
