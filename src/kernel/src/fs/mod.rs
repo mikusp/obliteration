@@ -440,7 +440,7 @@ impl Fs {
         } else if flags.intersects(OpenFlags::O_EXLOCK) {
             todo!("open({path}) with flags & O_EXLOCK");
         } else if flags.intersects(OpenFlags::O_TRUNC) {
-            todo!("open({path}) with flags & O_TRUNC");
+            warn!("open({path}) with flags & O_TRUNC");
         } else if flags.intersects(OpenFlags::O_CREAT) {
             let mode: i64 = i.args[2].try_into().unwrap();
             todo!("open({path}, {flags}) with mode = {mode:#x}");
