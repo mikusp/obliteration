@@ -185,6 +185,10 @@ impl EvfManager {
         };
 
         if satisfied
+            || entry
+                .name()
+                .clone()
+                .is_some_and(|x| x == "SceBootStatusFlags")
         {
             return Ok(SysOut::ZERO);
         }
