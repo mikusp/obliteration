@@ -127,7 +127,12 @@ impl EvfManager {
 
         info!("sys_evf_close({})", id);
 
-        todo!()
+        let mut objects = td.proc().objects_mut();
+        objects
+            .delete(id, Some(EventFlag::ENTRY_TYPE))
+            .ok_or(SysErr::Raw(ESRCH))?;
+
+        Ok(SysOut::ZERO)
     }
 
     fn sys_evf_wait(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
