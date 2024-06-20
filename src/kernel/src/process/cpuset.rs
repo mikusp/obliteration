@@ -1,7 +1,7 @@
 use crate::{errno::EINVAL, syscalls::SysErr};
 
 /// An implementation of `cpuset`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CpuSet {
     mask: CpuMask, // cs_mask
 }
@@ -18,7 +18,7 @@ impl CpuSet {
 
 /// An implementation of `cpuset_t`.
 #[repr(C)]
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CpuMask {
     pub bits: [u64; 1],
 }
