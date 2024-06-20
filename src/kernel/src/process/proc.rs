@@ -16,6 +16,7 @@ use crate::vm::Vm;
 use crate::{error, info, warn};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
+use libc::pthread_exit;
 use macros::Errno;
 use std::any::Any;
 use std::collections::HashMap;
@@ -105,6 +106,7 @@ impl VProc {
 
         // TODO: Move all syscalls here to somewhere else.
         sys.register(331, &vp, Self::sys_sched_yield);
+        sys.register(431, &vp, Self::sys_thr_exit);
         sys.register(455, &vp, Self::sys_thr_new);
         sys.register(466, &vp, Self::sys_rtprio_thread);
         sys.register(487, &vp, Self::sys_cpuset_getaffinity);
@@ -228,6 +230,12 @@ impl VProc {
     fn sys_sched_yield(self: &Arc<Self>, _: &VThread, _: &SysIn) -> Result<SysOut, SysErr> {
         std::thread::yield_now();
         Ok(SysOut::ZERO)
+    }
+
+    fn sys_thr_exit(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_thr_exit");
+
+        unsafe { pthread_exit(std::ptr::null_mut()) };
     }
 
     fn sys_thr_new(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
