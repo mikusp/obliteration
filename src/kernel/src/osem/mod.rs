@@ -170,6 +170,8 @@ impl OsemManager {
             .downcast()
             .map_err(|_| SysErr::Raw(ESRCH))?;
 
+        drop(objects);
+
         if need_count < 1 || need_count > sem.max_count {
             return Err(SysErr::Raw(EINVAL));
         }
