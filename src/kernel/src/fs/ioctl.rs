@@ -121,6 +121,8 @@ commands! {
         DIPSWCHECK2(&mut i32) = 0x40048806,
         /// Unkown dipsw command
         DIPSWUNK(&mut i32) = 0x40048807,
+        /// Unk
+        DIPSWUNK2(&Unknown16) = 0x8010880a,
 
         /// Get total size?
         DMEMTOTAL(&mut usize) = 0x4008800a,

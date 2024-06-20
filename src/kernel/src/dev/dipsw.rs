@@ -8,6 +8,7 @@ use crate::{
     },
     process::VThread,
     ucred::{Gid, Uid},
+    warn,
 };
 use std::sync::Arc;
 
@@ -34,6 +35,8 @@ impl DeviceDriver for Dipsw {
             match cmd {
                 // TODO: properly implement this
                 IoCmd::DIPSWCHECK2(val) | IoCmd::DIPSWUNK(val) => *val = false as i32,
+                IoCmd::DIPSWCHECK(_) => warn!("stubbed DIPSWCHECK"),
+                IoCmd::DIPSWUNK2(_) => warn!("stubbed DIPSWUNK2"),
                 _ => todo!(),
             }
         } else {
