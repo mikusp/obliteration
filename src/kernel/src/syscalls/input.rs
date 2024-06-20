@@ -31,7 +31,8 @@ impl SysArg {
         let path = match path.to_str() {
             Ok(v) => match VPath::new(v) {
                 Some(v) => v,
-                None => todo!("syscall with non-absolute path {v}"),
+                // None => todo!("syscall with non-absolute path {v}"),
+                None => &VPath::new_unchecked(v),
             },
             Err(_) => return Err(SysErr::Raw(ENOENT)),
         };
@@ -74,7 +75,8 @@ impl SysArg {
 
         match len {
             Some(i) => Ok(Some(
-                std::str::from_utf8(std::slice::from_raw_parts(ptr as _, i)).unwrap(),
+                std::str::from_utf8(std::slice::from_raw_parts(ptr as _, i))
+                    .unwrap_or("broken_shm_path"),
             )),
             None => Err(SysErr::Raw(ENAMETOOLONG)),
         }
