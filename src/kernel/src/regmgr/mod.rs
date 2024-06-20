@@ -4,7 +4,7 @@ use crate::errno::EINVAL;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::Ucred;
-use crate::{info, warn};
+use crate::{error, info, warn};
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroI32;
 use std::ops::Index;
@@ -68,11 +68,27 @@ impl RegMgr {
                 let v1 = unsafe { read::<u64>(req as _) };
                 let v2 = unsafe { read::<u32>(req.add(8) as _) };
 
-                self.decode_key(v1, v2, td.cred(), 1)
-                    .and_then(|k| todo!("regmgr_call({op}) with matched key = {k}"))
+                self.decode_key(v1, v2, td.cred(), 1).and_then(|k| {
+                    error!("regmgr_call({op}) with matched key = {k}");
+                    Ok(())
+                });
+
+                return Ok(SysOut::ZERO);
             }
             0x1b => {
                 warn!("stubbed regmgr_call(0x1b)");
+                return Ok(SysOut::ZERO);
+            }
+            0x1d => {
+                warn!("stubbed regmgr_call(0x1d)");
+                return Ok(SysOut::ZERO);
+            }
+            0x2 => {
+                warn!("stubbed regmgr_call(0x2)");
+                return Ok(SysOut::ZERO);
+            }
+            0xb => {
+                warn!("stubbed regmgr_call(0xb)");
                 return Ok(SysOut::ZERO);
             }
             0x27 | 0x40.. => Err(RegError::V800d0219),
@@ -236,7 +252,7 @@ impl RegMgr {
             } else {
                 for i in 0..value.len() {
                     if buf[i] != value[i] {
-                        todo!("regMgrComSetReg({key}) with new value");
+                        error!("regMgrComSetReg({key}) with new value");
                     }
                 }
             }
