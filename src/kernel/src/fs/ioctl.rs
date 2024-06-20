@@ -186,6 +186,10 @@ commands! {
         /// Geom unknown
         GEOMUNK1(&Unknown64) = 0x80404702,
 
+        /// Icc unknown
+        ICCCONFUNK1(&mut Unknown2) = 0xc0029203,
+        ICCCONFUNK2(&Unknown2) = 0x80029204,
+
         /// Get genuine random
         RNGGETGENUINE(&mut RngInput) = 0x40445301,
         /// Fips186Prng
