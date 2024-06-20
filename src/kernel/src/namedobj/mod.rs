@@ -1,4 +1,4 @@
-use crate::errno::EINVAL;
+use crate::errno::{EINVAL, ENOSYS};
 use crate::idt::Entry;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
@@ -16,8 +16,24 @@ impl NamedObjManager {
             warn!("stubbed sys_namedobj_delete");
             Ok(0.into())
         });
-        sys.register(601, &namedobj, |_, _, _| {
-            warn!("stubbed sys_mdbg_service");
+        sys.register(573, &namedobj, |_, _, _| {
+            warn!("stubbed sys_mdbg_call");
+
+            Ok(SysOut::ZERO)
+        });
+        sys.register(601, &namedobj, |_, _, i| {
+            let op = i.args[0].get();
+            // warn!("stubbed sys_mdbg_service {:#x}", i.args[0].get());
+
+            if op == 0xA {
+                unsafe {
+                    info!("mdbg 0xA, writing 0");
+                    *(i.args[2].get() as *mut u32) = 0;
+                }
+            } else if op == 0x6 {
+                return Err(SysErr::Raw(ENOSYS));
+            }
+
             Ok(0.into())
         });
 
