@@ -20,6 +20,10 @@ impl KernelQueueManager {
         sys.register(141, &kq, Self::sys_kqueueex);
         sys.register(362, &kq, Self::sys_kqueue);
         sys.register(363, &kq, Self::sys_kevent);
+        sys.register(392, &kq, |_, _, _| {
+            error!("stubbed sys_uuidgen");
+            Ok(SysOut::ZERO)
+        });
 
         kq
     }
