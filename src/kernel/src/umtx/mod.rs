@@ -1,8 +1,9 @@
 use bitflags::bitflags;
+use gmtx::{Gutex, GutexGroup};
 
 use crate::{
-    errno::EINVAL,
-    info,
+    errno::{EINVAL, EPERM},
+    error, info,
     process::VThread,
     syscalls::{SysArg, SysErr, SysIn, SysOut, Syscalls},
     time::TimeSpec,
@@ -14,11 +15,13 @@ use crate::{
     warn,
 };
 use std::{
+    collections::{hash_map::Entry, HashMap, VecDeque},
     hint,
     num::TryFromIntError,
     ptr,
     sync::{
         atomic::{AtomicI64, AtomicU32, Ordering},
+        mpsc::{channel, Sender},
         Arc,
     },
 };
@@ -27,11 +30,16 @@ mod condvar;
 mod futex;
 mod mutex;
 
-pub(super) struct UmtxManager {}
+pub(super) struct UmtxManager {
+    waiters: Gutex<HashMap<usize, VecDeque<WaitingThread>>>,
+}
 
 impl UmtxManager {
     pub fn new(sys: &mut Syscalls) -> Arc<Self> {
-        let umtx = Arc::new(UmtxManager {});
+        let gg = GutexGroup::new();
+        let umtx = Arc::new(UmtxManager {
+            waiters: gg.spawn(HashMap::new()),
+        });
 
         sys.register(454, &umtx, Self::sys__umtx_op);
 
@@ -43,14 +51,18 @@ impl UmtxManager {
         let op: i32 = i.args[1].try_into().unwrap();
 
         if let Some(op) = OP_TABLE.get(op as usize) {
-            op(td, i)
+            op(self, td, i)
         } else {
             Err(SysErr::Raw(EINVAL))
         }
     }
 }
 
-static OP_TABLE: [fn(&VThread, &SysIn) -> Result<SysOut, SysErr>; 23] = [
+struct WaitingThread {
+    tx: Sender<()>,
+}
+
+static OP_TABLE: [fn(&Arc<UmtxManager>, &VThread, &SysIn) -> Result<SysOut, SysErr>; 23] = [
     lock_umtx,         // UMTX_OP_LOCK
     unlock_umtx,       // UMTX_OP_UNLOCK
     wait,              // UMTX_OP_WAIT
@@ -77,17 +89,17 @@ static OP_TABLE: [fn(&VThread, &SysIn) -> Result<SysOut, SysErr>; 23] = [
 ];
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn lock_umtx(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn lock_umtx(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn unlock_umtx(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn unlock_umtx(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn wait(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let obj: *const i64 = i.args[0].into();
     let val: i64 = i.args[2].into();
     let timeout: *const Timespec = i.args[3].into();
@@ -98,38 +110,71 @@ fn wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         todo!("wait: timeout")
     }
 
-    let atomic = unsafe { AtomicI64::from_ptr(obj as _) };
+    // let atomic = unsafe { AtomicI64::from_ptr(obj as _) };
 
-    loop {
-        let value = atomic.load(Ordering::Relaxed);
+    // loop {
+    //     let value = atomic.load(Ordering::Relaxed);
 
-        if value != val {
-            break;
+    //     if value != val {
+    //         break;
+    //     }
+
+    //     hint::spin_loop();
+    // }
+
+    let mut waiters = mgr.waiters.write();
+
+    let rx = match waiters.entry(obj as usize) {
+        Entry::Occupied(mut e) => {
+            let queue = e.get_mut();
+            let (tx, rx) = channel();
+
+            queue.push_back(WaitingThread { tx });
+
+            rx
         }
+        Entry::Vacant(v) => {
+            let (tx, rx) = channel();
+            let mut queue = VecDeque::new();
+            queue.push_back(WaitingThread { tx });
+            v.insert(queue);
 
-        hint::spin_loop();
+            rx
+        }
+    };
+
+    let _ = rx.recv().map_err(|_| SysErr::Raw(EINVAL))?;
+
+    Ok(SysOut::ZERO)
+}
+
+#[allow(unused_variables)] // TODO: remove when implementing
+fn wake(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    todo!()
+}
+
+#[allow(unused_variables)] // TODO: remove when implementing
+fn trylock_umutex(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    todo!()
+}
+
+#[allow(unused_variables)] // TODO: remove when implementing
+fn lock_umutex(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    let mutex_ptr: *const Umutex = i.args[0].into();
+
+    info!("sys__umtx_mutex_lock({:#x})", mutex_ptr as usize);
+
+    let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
+
+    unsafe {
+        inner_mutex.lock();
     }
 
     Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn wake(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
-}
-
-#[allow(unused_variables)] // TODO: remove when implementing
-fn trylock_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
-}
-
-#[allow(unused_variables)] // TODO: remove when implementing
-fn lock_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
-}
-
-#[allow(unused_variables)] // TODO: remove when implementing
-fn unlock_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn unlock_umutex(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let mutex_ptr: *const Umutex = i.args[0].into();
 
     info!("sys__umtx_mutex_unlock({:#x})", mutex_ptr as usize);
@@ -144,18 +189,18 @@ fn unlock_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn set_ceiling(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn set_ceiling(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
-fn cv_wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn cv_wait(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let ucond_ptr: *const Ucond = i.args[0].into();
     let flags: CvWaitFlags = i.args[2].try_into().unwrap();
     let mutex_ptr: *const Umutex = i.args[3].into();
     let timeout: *const TimeSpec = i.args[4].into();
 
     info!(
-        "sys__umtx_cv_wait({:#x}, {:?}, {:#x}, {:#x})",
+        "...=sys__umtx_cv_wait({:#x}, {:?}, {:#x}, {:#x})",
         ucond_ptr as usize, flags, mutex_ptr as usize, timeout as usize
     );
 
@@ -168,20 +213,25 @@ fn cv_wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 
     unsafe { inner_cv.wait(&inner_mutex) };
 
+    info!(
+        "0=sys__umtx_cv_wait({:#x}, {:?}, {:#x}, {:#x})",
+        ucond_ptr as usize, flags, mutex_ptr as usize, timeout as usize
+    );
+
     Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn cv_signal(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn cv_signal(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn cv_broadcast(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn cv_broadcast(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
-fn wait_uint(_: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn wait_uint(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let obj: *const u32 = i.args[0].into();
     let val: u32 = i.args[2].try_into().unwrap();
 
@@ -196,65 +246,118 @@ fn wait_uint(_: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn rw_rdlock(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn rw_rdlock(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn rw_wrlock(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn rw_wrlock(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    error!("sys__umtx_rw_wrlock");
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn rw_unlock(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn rw_unlock(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn wait_uint_private(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn wait_uint_private(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    let obj: *const u32 = i.args[0].into();
+    let val: u32 = i.args[2].try_into().unwrap();
+    let timeout: *const Timespec = i.args[3].into();
+
+    info!(
+        "sys__umtx_wait_uint_private({:#x}, {:#x})",
+        obj as usize, val
+    );
+
+    if timeout != ptr::null() {
+        todo!("wait: timeout")
+    }
+
+    // let atomic = unsafe { AtomicI64::from_ptr(obj as _) };
+
+    // loop {
+    //     let value = atomic.load(Ordering::Relaxed);
+
+    //     if value != val {
+    //         break;
+    //     }
+
+    //     hint::spin_loop();
+    // }
+
+    let mut waiters = mgr.waiters.write();
+
+    let rx = match waiters.entry(obj as usize) {
+        Entry::Occupied(mut e) => {
+            let queue = e.get_mut();
+            let (tx, rx) = channel();
+
+            queue.push_back(WaitingThread { tx });
+
+            rx
+        }
+        Entry::Vacant(v) => {
+            let (tx, rx) = channel();
+            let mut queue = VecDeque::new();
+            queue.push_back(WaitingThread { tx });
+            v.insert(queue);
+
+            rx
+        }
+    };
+
+    drop(waiters);
+
+    let _ = rx.recv().map_err(|_| SysErr::Raw(EINVAL))?;
+
+    Ok(SysOut::ZERO)
+}
+
+#[allow(unused_variables)] // TODO: remove when implementing
+fn wake_private(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn wake_private(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
-}
-
-#[allow(unused_variables)] // TODO: remove when implementing
-fn wait_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn wait_umutex(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let mutex_ptr: *const Umutex = i.args[0].into();
 
-    info!("sys__umtx_wait_umutex({:#x})", mutex_ptr as usize);
+    info!("...=sys__umtx_wait_umutex({:#x})", mutex_ptr as usize);
 
     let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
 
     inner_mutex.wait();
 
+    info!("0=sys__umtx_wait_umutex({:#x})", mutex_ptr as usize);
+
     Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn wake_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn wake_umutex(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let mutex_ptr: *const Umutex = i.args[0].into();
 
-    info!("sys__umtx_wake_umutex({:#x})", mutex_ptr as usize);
+    info!("...=sys__umtx_wake_umutex({:#x})", mutex_ptr as usize);
 
     let inner_mutex = unsafe { Mutex::from_ptr(mutex_ptr as _) };
 
-    unsafe {
-        inner_mutex.wake();
-    }
+    inner_mutex.wake();
+
+    info!("0=sys__umtx_wake_umutex({:#x})", mutex_ptr as usize);
 
     Ok(SysOut::ZERO)
 }
 
-fn sem_wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn sem_wait(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     let sem_ptr: *const Usem2 = i.args[0].into();
     let arg_size: u32 = i.args[3].try_into().unwrap();
     let arg: usize = i.args[4].into();
 
     info!(
-        "sys__umtx_sem_wait({:#x}, {:#x}, {:#x})",
+        "...=sys__umtx_sem_wait({:#x}, {:#x}, {:#x})",
         sem_ptr as usize, arg_size, arg
     );
 
@@ -267,21 +370,50 @@ fn sem_wait(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         hint::spin_loop();
     }
 
+    info!(
+        "0=sys__umtx_sem_wait({:#x}, {:#x}, {:#x})",
+        sem_ptr as usize, arg_size, arg
+    );
+
     Ok(SysOut::ZERO)
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn sem_wake(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn sem_wake(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn nwake_private(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
-    todo!()
+fn nwake_private(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+    let obj: *const usize = i.args[0].into();
+    let val: usize = i.args[2].into();
+
+    let keys = unsafe { std::slice::from_raw_parts(obj, val) };
+    info!("sys__umtx_nwake_private({:#?})", keys);
+
+    let mut waiters = mgr.waiters.write();
+
+    for key in keys {
+        match waiters.entry(obj as usize) {
+            Entry::Occupied(mut e) => {
+                let queue = e.get_mut();
+
+                queue.retain(|wt| {
+                    let _ = wt.tx.send(());
+                    false
+                });
+
+                e.remove()
+            }
+            Entry::Vacant(v) => return Err(SysErr::Raw(EPERM)),
+        };
+    }
+
+    return Ok(SysOut::ZERO);
 }
 
 #[allow(unused_variables)] // TODO: remove when implementing
-fn wake2_umutex(td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+fn wake2_umutex(mgr: &Arc<UmtxManager>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
     todo!()
 }
 
