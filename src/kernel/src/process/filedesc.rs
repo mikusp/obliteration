@@ -247,6 +247,19 @@ impl FileDesc {
         Ok(file.clone())
     }
 
+    pub fn dup2(&self, oldfd: i32, newfd: i32) -> Result<(), GetFileError> {
+        let oldfd: usize = oldfd.try_into()?;
+        let newfd: usize = newfd.try_into()?;
+
+        let mut files = self.files.write();
+
+        if let Ok([oldfile, newfile]) = files.get_many_mut::<2>([oldfd, newfd]) {
+            *newfile = oldfile.clone();
+        }
+
+        Ok(())
+    }
+
     /// See `kern_close` on the PS4 for a reference.
     pub fn free(&self, fd: i32) -> Result<(), FreeError> {
         let fd: usize = fd.try_into()?;

@@ -149,6 +149,7 @@ impl Fs {
         sys.register(6, &fs, Self::sys_close);
         sys.register(54, &fs, Self::sys_ioctl);
         sys.register(56, &fs, Self::sys_revoke);
+        sys.register(90, &fs, Self::sys_dup2);
         sys.register(120, &fs, Self::sys_readv);
         sys.register(121, &fs, Self::sys_writev);
         sys.register(136, &fs, Self::sys_mkdir);
@@ -525,6 +526,17 @@ impl Fs {
         self.revoke(vn, td)?;
 
         Ok(SysOut::ZERO)
+    }
+
+    fn sys_dup2(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let oldfd: i32 = i.args[0].try_into().unwrap();
+        let newfd: i32 = i.args[1].try_into().unwrap();
+
+        info!("...=sys_dup2({}, {})", oldfd, newfd);
+
+        td.proc().files().dup2(oldfd, newfd)?;
+
+        Ok(newfd.into())
     }
 
     fn revoke(&self, vn: Arc<Vnode>, td: &VThread) -> Result<(), RevokeError> {
