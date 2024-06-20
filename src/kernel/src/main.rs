@@ -1,6 +1,8 @@
 #![feature(trait_upcasting)]
 #![feature(iter_map_windows)]
 #![feature(core_intrinsics)]
+#![feature(slice_take)]
+#![feature(get_many_mut)]
 use crate::arch::MachDep;
 use crate::budget::{Budget, BudgetManager, ProcType};
 use crate::dev::{
