@@ -33,8 +33,10 @@ use crate::ucred::{AuthAttrs, AuthCaps, AuthInfo, AuthPaid, Gid, Ucred, Uid};
 use crate::umtx::UmtxManager;
 use clap::Parser;
 use dev::{
-    CameraInitError, DceInitError, GcInitError, HidInitError, HmdInitError, RngInitError,
-    SblSrvInitError,
+    AjmInitError, AjmManager, CameraInitError, DceInitError, GcInitError, GeomInitError,
+    GeomManager, HidInitError, HmdInitError, IccInitError, IccManager, NotificationInitError,
+    NotificationManager, NpDrmInitError, NpDrmManager, RngInitError, SblSrvInitError,
+    UrandomInitError, UrandomManager,
 };
 use llt::{OsThread, SpawnError};
 use macros::vpath;
@@ -375,6 +377,18 @@ fn run() -> Result<(), KernelError> {
     let dce = DceManager::new()?;
     #[allow(unused_variables)] // TODO: Remove this when someone uses hid.
     let hid = HidManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses npdrm.
+    let npdrm = NpDrmManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses icc.
+    let icc = IccManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses geom.
+    let geom = GeomManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses ajm.
+    let ajm = AjmManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses notification.
+    let notification = NotificationManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses urandom.
+    let urandom = UrandomManager::new()?;
 
     // Initialize kernel components.
     #[allow(unused_variables)] // TODO: Remove this when someone uses debug.
@@ -642,6 +656,9 @@ enum KernelError {
     #[error("debug manager initialization failed")]
     DebugManagerInitFailed(#[from] DebugManagerInitError),
 
+    #[error("ajm manager initialization failed")]
+    AjmManagerInitFailed(#[from] AjmInitError),
+
     #[error("gc manager initialization failed")]
     GcManagerInitFailed(#[from] GcInitError),
 
@@ -662,6 +679,21 @@ enum KernelError {
 
     #[error("hid manager initialization failed")]
     HidManagerInitFailed(#[from] HidInitError),
+
+    #[error("npdrm manager initialization failed")]
+    NpDrmManagerInitFailed(#[from] NpDrmInitError),
+
+    #[error("icc manager initialization failed")]
+    IccManagerInitFailed(#[from] IccInitError),
+
+    #[error("geom manager initialization failed")]
+    GeomManagerInitFailed(#[from] GeomInitError),
+
+    #[error("notification manager initialization failed")]
+    NotificationManagerInitFailed(#[from] NotificationInitError),
+
+    #[error("urandom manager initialization failed")]
+    UrandomManagerInitFailed(#[from] UrandomInitError),
 
     #[error("dmem manager initialization failed")]
     DmemManagerInitFailed(#[from] DmemManagerInitError),
