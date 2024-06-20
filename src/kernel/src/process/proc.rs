@@ -1,6 +1,6 @@
 use super::{
-    AppInfo, Binaries, CpuLevel, CpuWhich, FileDesc, Limits, ResourceLimit, ResourceType,
-    SignalActs, SpawnError, VProcGroup, VThread, NEXT_ID,
+    AppInfo, Binaries, CpuLevel, CpuMask, CpuSet, CpuWhich, FileDesc, Limits, ResourceLimit,
+    ResourceType, SignalActs, SpawnError, VProcGroup, VThread, NEXT_ID,
 };
 use crate::budget::ProcType;
 use crate::dev::DmemContainer;
@@ -24,6 +24,7 @@ use std::ffi::{CStr, CString};
 use std::mem::size_of;
 use std::mem::zeroed;
 use std::num::NonZeroI32;
+use std::ops::Deref;
 use std::ptr::null;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -334,6 +335,7 @@ impl VProc {
                 if let Some(n) = thr_name {
                     let cs = CString::new(String::from_utf8(n.bytes().take(15).collect()).unwrap())
                         .unwrap();
+                    info!("setting thread name for {}: {:#?}", ret, cs);
                     libc::pthread_setname_np(ret, cs.as_ptr());
                 }
 
@@ -424,21 +426,25 @@ impl VProc {
     fn sys_cpuset_setaffinity(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let level: CpuLevel = TryInto::<i32>::try_into(i.args[0]).unwrap().try_into()?;
         let which: CpuWhich = TryInto::<i32>::try_into(i.args[1]).unwrap().try_into()?;
-        let _id: i64 = i.args[2].into();
+        let id: i64 = i.args[2].into();
         let cpusetsize: usize = i.args[3].into();
-        let _mask: *const u8 = i.args[4].into();
+        let mask: *const u8 = i.args[4].into();
 
         // TODO: Refactor this for readability.
         if cpusetsize.wrapping_sub(8) > 8 {
             return Err(SysErr::Raw(ERANGE));
         }
 
+        let mask = unsafe { std::slice::from_raw_parts(mask, cpusetsize) };
+
+        info!(
+            "sys_cpuset_setaffinity({:?}, {:?}, {}, {:?})",
+            level, which, id, mask
+        );
+
         match level {
             CpuLevel::Which => match which {
-                CpuWhich::Tid => {
-                    error!("setaffinity for a thread");
-                    Ok(SysOut::ZERO)
-                }
+                CpuWhich::Tid => self.cpuset_setthread(id, mask),
                 v => todo!("sys_cpuset_setaffinity with which = {v:?}"),
             },
             v => todo!("sys_cpuset_setaffinity with level = {v:?}"),
@@ -450,7 +456,15 @@ impl VProc {
         let td = match which {
             CpuWhich::Tid => {
                 if id == -1 {
-                    todo!("cpuset_which with id = -1");
+                    let id = VThread::current().unwrap().id();
+                    let threads = self.threads.read();
+                    let td = threads
+                        .iter()
+                        .find(|t| t.id().get() == id.get())
+                        .ok_or(SysErr::Raw(ESRCH))?
+                        .clone();
+
+                    Some(td)
                 } else {
                     let threads = self.threads.read();
                     let td = threads
@@ -469,6 +483,44 @@ impl VProc {
             Some(v) => Ok(v),
             None => todo!("cpuset_which with td = NULL"),
         }
+    }
+
+    fn cpuset_setthread(&self, id: i64, mask: &[u8]) -> Result<SysOut, SysErr> {
+        return Ok(SysOut::ZERO);
+
+        let td = self.cpuset_which(CpuWhich::Tid, id)?;
+        let mut cpuset = td.cpuset_mut();
+        let nset = self.cpuset_shadow(&cpuset, mask)?;
+
+        *cpuset = nset.clone();
+        unsafe {
+            if libc::sched_setaffinity(
+                td.id().get().try_into().unwrap(),
+                mask.len(),
+                mask.as_ptr() as _,
+            ) != 0
+            {
+                Err(SysErr::Raw(
+                    NonZeroI32::new(std::io::Error::last_os_error().raw_os_error().unwrap())
+                        .unwrap(),
+                ))
+            } else {
+                Ok(SysOut::ZERO)
+            }
+        }
+    }
+
+    fn cpuset_shadow(&self, _current_cpuset: &CpuSet, mask: &[u8]) -> Result<CpuSet, SysErr> {
+        //TODO: compute shadowing from parent
+        let cpuset = u64::from_le_bytes(
+            mask.clone()
+                .take(..8)
+                .unwrap()
+                .try_into()
+                .expect("cpuset_shadow: incorrect mask"),
+        );
+
+        Ok(CpuSet::new(CpuMask { bits: [cpuset; 1] }))
     }
 
     fn sys_get_authinfo(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
