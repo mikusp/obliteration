@@ -134,6 +134,10 @@ impl Vnode {
         self.backend.read(self, off, buf, td)
     }
 
+    pub fn stat(self: &Arc<Self>) -> Result<Stat, Box<dyn Errno>> {
+        self.backend.stat(self)
+    }
+
     pub fn write(
         self: &Arc<Self>,
         off: u64,
@@ -256,6 +260,9 @@ pub(super) trait VnodeBackend: Debug + Send + Sync + 'static {
         panic!("vop_revoke called");
     }
 
+    /// An implementation of `vop_stat`.
+    fn stat(&self, #[allow(unused_variables)] vn: &Arc<Vnode>) -> Result<Stat, Box<dyn Errno>>;
+
     /// An implementation of `vop_read`.
     fn read(
         &self,
@@ -339,7 +346,7 @@ impl FileBackend for VnodeFileBackend {
     }
 
     fn stat(&self, file: &VFile, td: Option<&VThread>) -> Result<Stat, Box<dyn Errno>> {
-        todo!()
+        self.0.backend.stat(&self.0)
     }
 
     fn truncate(
