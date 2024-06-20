@@ -2,7 +2,6 @@ use crate::budget::ProcType;
 use crate::dev::DmemContainer;
 use crate::errno::{EINVAL, ENAMETOOLONG, EPERM, ESRCH};
 use crate::fs::{Fs, Vnode};
-use crate::info;
 use crate::signal::{
     strsignal, SigChldFlags, Signal, SignalAct, SignalFlags, SIGCHLD, SIGKILL, SIGSTOP, SIG_DFL,
     SIG_IGN,
@@ -10,6 +9,7 @@ use crate::signal::{
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::ucred::{AuthInfo, Privilege};
 use crate::vm::MemoryManagerError;
+use crate::{info, warn};
 use std::cmp::min;
 use std::ffi::c_char;
 use std::sync::atomic::AtomicI32;
@@ -56,6 +56,7 @@ impl ProcManager {
         sys.register(464, &pmgr, Self::sys_thr_set_name);
         sys.register(585, &pmgr, Self::sys_is_in_sandbox);
         sys.register(602, &pmgr, Self::sys_randomized_path);
+        sys.register(627, &pmgr, Self::sys_get_cpu_usage_all);
 
         pmgr
     }
@@ -331,6 +332,12 @@ impl ProcManager {
         if set != 0 {
             todo!("sys_randomized_path with non-null set");
         }
+
+        Ok(SysOut::ZERO)
+    }
+
+    fn sys_get_cpu_usage_all(self: &Arc<Self>, td: &VThread, _: &SysIn) -> Result<SysOut, SysErr> {
+        warn!("stubbed sys_get_cpu_usage_all");
 
         Ok(SysOut::ZERO)
     }
