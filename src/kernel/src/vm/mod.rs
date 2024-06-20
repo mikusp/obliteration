@@ -163,6 +163,7 @@ impl Vm {
         sys.register(73, &mm, Self::sys_munmap);
         sys.register(74, &mm, Self::sys_mprotect);
         sys.register(203, &mm, Self::sys_mlock);
+        sys.register(379, &mm, Self::sys_mtypeprotect);
         sys.register(477, &mm, Self::sys_mmap);
         sys.register(548, &mm, Self::sys_batch_map);
         sys.register(572, &mm, Self::sys_virtual_query);
@@ -2261,6 +2262,12 @@ impl Vm {
         }
 
         self.mlock(addr, len)?;
+
+        Ok(SysOut::ZERO)
+    }
+
+    fn sys_mtypeprotect(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_mtypeprotect");
 
         Ok(SysOut::ZERO)
     }
