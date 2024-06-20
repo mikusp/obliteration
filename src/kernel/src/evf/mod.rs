@@ -174,13 +174,29 @@ impl EvfManager {
             return Err(SysErr::Raw(EPERM));
         }
 
+        let wait_mode = EventFlagWaitMode::from_bits_retain(wait_mode);
+        let current_pattern = flag.pattern.read();
+        let satisfied = if wait_mode.intersects(EventFlagWaitMode::EVF_WAITMODE_AND) {
+            *current_pattern & pattern == pattern
+        } else if wait_mode.intersects(EventFlagWaitMode::EVF_WAITMODE_OR) {
+            *current_pattern & pattern != 0
+        } else {
+            unreachable!();
+        };
+
+        if satisfied
+        {
+            return Ok(SysOut::ZERO);
+        }
+        drop(current_pattern);
+
         let sync = Arc::new((Mutex::new(None), Condvar::new()));
 
         let wt = WaitingThread {
             td: VThread::current().unwrap().clone(),
             sync: Arc::downgrade(&sync),
             pattern: pattern,
-            wait_mode: EventFlagWaitMode::from_bits_retain(wait_mode),
+            wait_mode: wait_mode,
         };
         queue.push(wt);
         drop(queue);
