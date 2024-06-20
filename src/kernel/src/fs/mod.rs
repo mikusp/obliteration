@@ -167,6 +167,7 @@ impl Fs {
         sys.register(480, &fs, Self::sys_ftruncate);
         sys.register(493, &fs, Self::sys_fstatat);
         sys.register(496, &fs, Self::sys_mkdirat);
+        sys.register(670, &fs, Self::sys_aio_init);
 
         Ok(fs)
     }
@@ -931,6 +932,12 @@ impl Fs {
     ) -> Result<SysOut, SysErr> {
         // This will require relative lookups
         todo!()
+    }
+
+    fn sys_aio_init(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        warn!("stubbed sys_aio_init()");
+
+        Ok(SysOut::ZERO)
     }
 
     /// Gets root vnode of the mounted filesystem if `vn` is currently mounted or follow it if it is
