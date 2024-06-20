@@ -183,6 +183,9 @@ commands! {
         /// Unmap compute queue
         GCUNMAPCOMPUTEQUEUE(&mut Unknown12) = 0xc00c810e,
 
+        /// Geom unknown
+        GEOMUNK1(&Unknown64) = 0x80404702,
+
         /// Get genuine random
         RNGGETGENUINE(&mut RngInput) = 0x40445301,
         /// Fips186Prng
@@ -206,6 +209,7 @@ type Unknown12 = Unknown<12>;
 type Unknown16 = Unknown<16>;
 type Unknown36 = Unknown<36>;
 type Unknown48 = Unknown<48>;
+type Unknown64 = Unknown<64>;
 type Unknown132 = Unknown<132>;
 
 /// A dummy type to be used as a placeholder for unknown data.
