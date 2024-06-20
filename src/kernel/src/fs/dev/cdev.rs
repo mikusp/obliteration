@@ -1,6 +1,5 @@
 use super::dirent::Dirent;
 use crate::errno::{Errno, ENODEV, ENOTTY};
-use crate::error;
 use crate::fs::{
     FileBackend, IoCmd, IoLen, IoVec, IoVecMut, Mode, OpenFlags, PollEvents, Stat, TruncateLength,
     VFile,
@@ -8,6 +7,7 @@ use crate::fs::{
 use crate::process::VThread;
 use crate::time::TimeSpec;
 use crate::ucred::{Gid, Ucred, Uid};
+use crate::{error, info};
 use bitflags::bitflags;
 use gmtx::{Gutex, GutexGroup, GutexReadGuard, GutexWriteGuard};
 use macros::Errno;
@@ -135,7 +135,29 @@ impl FileBackend for CdevFileBackend {
         buf: &mut [IoVecMut],
         td: Option<&VThread>,
     ) -> Result<IoLen, Box<dyn Errno>> {
-        todo!()
+        let mut handled = false;
+
+        use crate::fs::VnodeItem::Device;
+        file.vnode().and_then(|vn| {
+            vn.item().clone().and_then(|item| match item {
+                Device(cdev) => {
+                    if cdev.name == "urandom" {
+                        handled = true;
+                    } else {
+                        error!("read from {}", cdev.name);
+                    }
+
+                    None::<()>
+                }
+                _ => None,
+            })
+        });
+
+        if !handled {
+            error!("cdev read");
+        }
+
+        return Ok(buf.first().unwrap().len());
     }
 
     fn write(
@@ -145,7 +167,31 @@ impl FileBackend for CdevFileBackend {
         buf: &[IoVec],
         td: Option<&VThread>,
     ) -> Result<IoLen, Box<dyn Errno>> {
-        error!("cdev write");
+        let mut printed = false;
+        use crate::fs::VnodeItem::Device;
+        file.vnode().and_then(|vn| {
+            vn.item().clone().and_then(|item| match item {
+                Device(cdev) => {
+                    if cdev.name == "console" || cdev.name == "deci_tty6" {
+                        for b in buf {
+                            let cstr: &[u8] = &*b;
+                            info!("{}", String::from_utf8(Vec::from(cstr)).unwrap());
+                        }
+                        printed = true;
+                    } else {
+                        error!("write to {}", cdev.name);
+                    }
+
+                    None::<()>
+                }
+                _ => None,
+            })
+        });
+
+        if !printed {
+            error!("cdev write");
+        }
+
         return Ok(buf.first().unwrap().len());
     }
 
