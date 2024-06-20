@@ -8,11 +8,11 @@ pub struct Entry<T> {
 
 impl<T> Entry<T> {
     pub fn new(name: Option<String>, data: T, ty: u16) -> Self {
-        Self {
-            name: name,
-            data,
-            ty,
-        }
+        Self { name, data, ty }
+    }
+
+    pub fn name(&self) -> &Option<String> {
+        &self.name
     }
 
     pub fn data(&self) -> &T {
