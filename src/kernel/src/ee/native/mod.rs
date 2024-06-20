@@ -1,3 +1,4 @@
+use crate::error;
 use crate::fs::{VPath, VPathBuf};
 use crate::process::VThread;
 use crate::rtld::{CodeWorkspaceError, Memory, Module, UnprotectSegmentError};
@@ -516,7 +517,9 @@ impl NativeEngine {
     /// # Safety
     /// This method cannot be called from Rust.
     unsafe extern "sysv64" fn int44(&self, offset: usize, module: &VPathBuf) -> ! {
-        panic!("Exiting with int 0x44 at {offset:#x} on {module}.");
+        error!("Exiting with int 0x44 at {offset:#x} on {module}.");
+        unsafe { *(0 as *mut i32) = 0 };
+        panic!("")
     }
 
     unsafe fn build_fs_trampoline(
