@@ -29,7 +29,7 @@ pub struct VThread {
     pri_class: u16,                  // td_pri_class
     base_user_pri: u16,              // td_base_user_pri
     pcb: Gutex<Pcb>,                 // td_pcb
-    cpuset: CpuSet,                  // td_cpuset
+    cpuset: Gutex<CpuSet>,           // td_cpuset
     name: Gutex<Option<String>>,     // td_name
     fpop: Gutex<Option<Arc<VFile>>>, // td_fpop
     pub kernel_stack: Arc<KernelStack>,
@@ -53,8 +53,8 @@ impl VThread {
                 fsbase: 0,
                 flags: PcbFlags::empty(),
             }),
-            cpuset: CpuSet::new(CpuMask::default()), // TODO: Same here.
-            name: gg.spawn(None),                    // TODO: Same here
+            cpuset: gg.spawn(CpuSet::new(CpuMask::default())), // TODO: Same here.
+            name: gg.spawn(None),                              // TODO: Same here
             fpop: gg.spawn(None),
             kernel_stack,
         }
@@ -101,8 +101,12 @@ impl VThread {
         self.pcb.write()
     }
 
-    pub fn cpuset(&self) -> &CpuSet {
-        &self.cpuset
+    pub fn cpuset(&self) -> GutexReadGuard<'_, CpuSet> {
+        self.cpuset.read()
+    }
+
+    pub fn cpuset_mut(&self) -> GutexWriteGuard<'_, CpuSet> {
+        self.cpuset.write()
     }
 
     pub fn name(&self) -> GutexReadGuard<'_, Option<String>> {
