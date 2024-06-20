@@ -958,6 +958,36 @@ impl Fs {
         td: Option<&VThread>,
     ) -> Result<SysOut, SysErr> {
         // This will require relative lookups
+        info!("mkdirat({:?}, {}, {})", at, path, mode);
+
+        if path == vpath!("/mnt/sandbox")
+            || path == vpath!("/mnt/pfs")
+            || path == vpath!("/mnt/ext0")
+            || path == vpath!("/mnt/disc")
+            || path == vpath!("/mnt/rnps")
+            || path == vpath!("/mnt/usb0")
+            || path == vpath!("/mnt/usb1")
+            || path == vpath!("/mnt/usb2")
+            || path == vpath!("/mnt/usb3")
+            || path == vpath!("/mnt/usb4")
+            || path == vpath!("/mnt/usb5")
+            || path == vpath!("/mnt/usb6")
+            || path == vpath!("/mnt/usb7")
+            || path == vpath!("/user/TRASH")
+            || path == vpath!("/system_data")
+            || path == vpath!("/system_data/TRASH")
+            || path == vpath!("/system_data/nobackup/temp")
+            || path == vpath!("/user/temp")
+            || path == vpath!("/user/temp/share")
+            || path == vpath!("/user/temp/fsroot_temp")
+            || path == vpath!("/user/temp/common_temp")
+            || path == vpath!("/user")
+            || path == vpath!("/user/temp/tmb_picker")
+            || true
+        {
+            return Ok(SysOut::ZERO);
+        }
+
         todo!()
     }
 
