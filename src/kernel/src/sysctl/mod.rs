@@ -4,9 +4,10 @@ use crate::errno::{
     EFAULT, EINVAL, EISDIR, ENAMETOOLONG, ENOENT, ENOMEM, ENOTDIR, EOPNOTSUPP, EPERM, ESRCH,
 };
 use crate::process::VThread;
+use crate::rtld::Module;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
 use crate::vm::Vm;
-use crate::warn;
+use crate::{info, warn};
 use std::any::Any;
 use std::cmp::min;
 use std::ptr::null_mut;
@@ -86,8 +87,16 @@ impl Sysctl {
     pub const KERN_RNGPSEUDO: i32 = 47;
     pub const KERN_PROC_APPINFO: i32 = 35;
     pub const KERN_PROC_SANITIZER: i32 = 41;
+    pub const KERN_PROC_CALLREC: i32 = 42;
     pub const KERN_PROC_PTC: i32 = 43;
+    pub const KERN_PROC_DYNLIB: i32 = 44;
+    pub const KERN_BACKUP_RESTORE_MODE: i32 = 580;
+
     pub const MACHDEP_TSC_FREQ: i32 = 492;
+    pub const MACHDEP_IDPS: i32 = 906;
+    pub const MACHDEP_OPENPSID: i32 = 908;
+    pub const MACHDEP_RCMGR_INTDEV: i32 = 916;
+    pub const MACHDEP_RCMGR_PSM_INTDEV: i32 = 917;
 
     pub const VM_PS4DEV: i32 = 1;
     pub const VM_PS4DEV_TRCMEM_TOTAL: i32 = 571;
@@ -384,6 +393,19 @@ impl Sysctl {
         Ok(())
     }
 
+    fn kern_proc_callrec(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed kern_proc_callrec");
+        req.write(&(0u32).to_ne_bytes())?;
+
+        Ok(())
+    }
+
     fn kern_proc_ptc(
         &self,
         _: &'static Oid,
@@ -400,6 +422,46 @@ impl Sysctl {
             Ordering::Relaxed,
         );
 
+        Ok(())
+    }
+
+    fn kern_dynlib_get_libkernel_text_segment(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed kern_dynlib_get_libkernel_text_segment");
+        let libkernel_text = req
+            .td
+            .proc()
+            .bin()
+            .as_ref()
+            .unwrap()
+            .list()
+            .filter(|m| {
+                let is_libkernel = m
+                    .names()
+                    .iter()
+                    .filter(|name| name.contains("libkernel"))
+                    .collect::<Vec<&String>>()
+                    .is_empty();
+
+                is_libkernel
+            })
+            .collect::<Vec<&Arc<Module>>>()
+            .first()
+            .and_then(|md| {
+                let text_segment_offset = md.memory().text_segment().start();
+
+                Some(text_segment_offset + md.memory().addr())
+            });
+
+        if let Some(addr) = libkernel_text {
+            info!("writing {:#x}", addr);
+            req.write(&addr.to_ne_bytes())?;
+        }
         Ok(())
     }
 
@@ -453,6 +515,17 @@ impl Sysctl {
         Ok(())
     }
 
+    fn kern_backup_restore_mode(
+        &self,
+        _: &'static Oid,
+        _: &Arg,
+        _: usize,
+        _req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed kern_backup_restore_mode");
+        Ok(())
+    }
+
     fn budgets_mlock_avail(
         &self,
         _: &'static Oid,
@@ -496,6 +569,54 @@ impl Sysctl {
                 Ok(())
             }
         }
+    }
+
+    fn machdep_idps(
+        &self,
+        oid: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed machdep_idps");
+
+        Ok(())
+    }
+
+    fn machdep_openpsid(
+        &self,
+        oid: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed machdep_openpsid");
+
+        Ok(())
+    }
+
+    fn machdep_rcmgr_intdev(
+        &self,
+        oid: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed machdep_rcmgr_intdev");
+
+        Ok(())
+    }
+
+    fn machdep_rcmgr_psm_intdev(
+        &self,
+        oid: &'static Oid,
+        _: &Arg,
+        _: usize,
+        req: &mut SysctlReq,
+    ) -> Result<(), SysErr> {
+        warn!("stubbed machdep_rcmgr_psm_intdev");
+
+        Ok(())
     }
 
     /// See `sysctl_handle_int` on the PS4 for a reference.
@@ -644,8 +765,9 @@ type Handler = fn(&Sysctl, &'static Oid, &Arg, usize, &mut SysctlReq) -> Result<
 //         └─── (1.14.35) KERN_PROC_APPINFO
 //         └─── ...
 //         └─── (1.14.41) KERN_PROC_SANITIZER
-//         └─── ...
-//         └─── (1.13.43) KERN_PROC_PTC
+//         └─── (1.14.42) KERN_PROC_CALLREC
+//         └─── (1.14.43) KERN_PROC_PTC
+//         └─── (1.14.44) KERN_PROC_DYNLIB
 //         └─── ...
 //     └─── (1.33) KERN_USRSTACK
 //     └─── ...
@@ -657,6 +779,8 @@ type Handler = fn(&Sysctl, &'static Oid, &Arg, usize, &mut SysctlReq) -> Result<
 //         └─── ...
 //         └─── (1.42.1252) KERN_SCHED_CPUSETSIZE
 //     └─── (1.47) KERN_RNGPSEUDO
+//     └─── ...
+//     └─── (1.580) KERN_BACKUP_RESTORE_MODE
 //     └─── ...
 //     └─── (1.1157)
 //         └─── ...
@@ -685,6 +809,13 @@ type Handler = fn(&Sysctl, &'static Oid, &Arg, usize, &mut SysctlReq) -> Result<
 // └─── (7) MACHDEP
 //     └─── ...
 //     └─── (7.492) MACHDEP_TSC_FREQ
+//     └─── ...
+//     └─── (7.906) MACHDEP_IDPS
+//     └─── ...
+//     └─── (7.908) MACHDEP_OPENPSID
+//     └─── ...
+//     └─── (7.916) MACHDEP_RCMGR_INTDEV
+//     └─── (7.917) MACHDEP_RCMGR_INTDEV
 //     └─── ...
 // └─── (8) USER
 //     └─── ...
@@ -782,7 +913,7 @@ static KERN_PROC_APPINFO: Oid = Oid {
 
 static KERN_PROC_SANITIZER: Oid = Oid {
     parent: &KERN_PROC_CHILDREN,
-    link: Some(&KERN_PROC_PTC), // TODO: Use a proper value.
+    link: Some(&KERN_PROC_CALLREC), // TODO: Use a proper value.
     number: Sysctl::KERN_PROC_SANITIZER,
     kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_NODE,
     arg1: None, // TODO: This value on the PS4 is not null.
@@ -794,9 +925,26 @@ static KERN_PROC_SANITIZER: Oid = Oid {
     enabled: true,
 };
 
+static KERN_PROC_CALLREC: Oid = Oid {
+    parent: &KERN_PROC_CHILDREN,
+    link: Some(&KERN_PROC_PTC), // TODO: Use a proper value.
+    number: Sysctl::KERN_PROC_CALLREC,
+    kind: Sysctl::CTLFLAG_RW
+        | Sysctl::CTLFLAG_ANYBODY
+        | Sysctl::CTLFLAG_MPSAFE
+        | Sysctl::CTLTYPE_OPAQUE,
+    arg1: None,
+    arg2: 0,
+    name: "callrec",
+    handler: Some(Sysctl::kern_proc_callrec),
+    fmt: "N",
+    descr: "Function last call recored", // sic!
+    enabled: true,
+};
+
 static KERN_PROC_PTC: Oid = Oid {
     parent: &KERN_PROC_CHILDREN,
-    link: None, // TODO: Implement this.
+    link: Some(&KERN_PROC_DYNLIB),
     number: Sysctl::KERN_PROC_PTC,
     kind: Sysctl::CTLFLAG_RD
         | Sysctl::CTLFLAG_ANYBODY
@@ -808,6 +956,20 @@ static KERN_PROC_PTC: Oid = Oid {
     handler: Some(Sysctl::kern_proc_ptc),
     fmt: "LU",
     descr: "Process time counter",
+    enabled: true,
+};
+
+static KERN_PROC_DYNLIB: Oid = Oid {
+    parent: &KERN_PROC_CHILDREN,
+    link: None, // TODO: Implement this.
+    number: Sysctl::KERN_PROC_DYNLIB,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_NODE,
+    arg1: None,
+    arg2: 0,
+    name: "kern_dynlib_get_libkernel_text_segment",
+    handler: Some(Sysctl::kern_dynlib_get_libkernel_text_segment),
+    fmt: "N",
+    descr: "Sanitizing mode", // sic!
     enabled: true,
 };
 
@@ -875,7 +1037,7 @@ static KERN_CPUMODE: Oid = Oid {
 
 static KERN_RNGPSEUDO: Oid = Oid {
     parent: &KERN_CHILDREN,
-    link: Some(&KERN_SCHED), // TODO: Use a proper value.
+    link: Some(&KERN_BACKUP_RESTORE_MODE), // TODO: Use a proper value.
     number: Sysctl::KERN_RNGPSEUDO,
     kind: Sysctl::CTLFLAG_RD | Sysctl::CTLFLAG_MPSAFE | Sysctl::CTLTYPE_OPAQUE,
     arg1: None,
@@ -884,6 +1046,20 @@ static KERN_RNGPSEUDO: Oid = Oid {
     handler: Some(Sysctl::kern_rngpseudo),
     fmt: "",
     descr: "RNGPseudo",
+    enabled: true,
+};
+
+static KERN_BACKUP_RESTORE_MODE: Oid = Oid {
+    parent: &KERN_CHILDREN,
+    link: Some(&KERN_SCHED), // TODO: Use a proper value.
+    number: Sysctl::KERN_BACKUP_RESTORE_MODE,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_INT,
+    arg1: None,
+    arg2: 0,
+    name: "backup_restore_mode",
+    handler: Some(Sysctl::kern_backup_restore_mode),
+    fmt: "I",
+    descr: "Set backup restore mode",
     enabled: true,
 };
 
@@ -1113,7 +1289,7 @@ static MACHDEP_CHILDREN: OidList = OidList {
 
 static MACHDEP_TSC_FREQ: Oid = Oid {
     parent: &MACHDEP_CHILDREN,
-    link: None, // TODO: Implement this.
+    link: Some(&MACHDEP_IDPS), // TODO: Implement this.
     number: Sysctl::MACHDEP_TSC_FREQ,
     kind: Sysctl::CTLFLAG_RW | Sysctl::CTLTYPE_U64,
     arg1: None,
@@ -1122,6 +1298,62 @@ static MACHDEP_TSC_FREQ: Oid = Oid {
     handler: Some(Sysctl::machdep_tsc_freq),
     fmt: "QU",
     descr: "Time Stamp Counter frequency",
+    enabled: true,
+};
+
+static MACHDEP_IDPS: Oid = Oid {
+    parent: &MACHDEP_CHILDREN,
+    link: Some(&MACHDEP_OPENPSID), // TODO: Implement this.
+    number: Sysctl::MACHDEP_IDPS,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_OPAQUE,
+    arg1: None,
+    arg2: 0,
+    name: "idps",
+    handler: Some(Sysctl::machdep_idps),
+    fmt: "",
+    descr: "IDPS",
+    enabled: true,
+};
+
+static MACHDEP_OPENPSID: Oid = Oid {
+    parent: &MACHDEP_CHILDREN,
+    link: Some(&MACHDEP_RCMGR_INTDEV),
+    number: Sysctl::MACHDEP_OPENPSID,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_OPAQUE,
+    arg1: None,
+    arg2: 0,
+    name: "openpsid",
+    handler: Some(Sysctl::machdep_openpsid),
+    fmt: "",
+    descr: "OpenPSID",
+    enabled: true,
+};
+
+static MACHDEP_RCMGR_INTDEV: Oid = Oid {
+    parent: &MACHDEP_CHILDREN,
+    link: Some(&MACHDEP_RCMGR_PSM_INTDEV),
+    number: Sysctl::MACHDEP_RCMGR_INTDEV,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_INT,
+    arg1: None,
+    arg2: 0,
+    name: "rcmgr_intdev",
+    handler: Some(Sysctl::machdep_rcmgr_intdev),
+    fmt: "I",
+    descr: "RCMgr intdev",
+    enabled: true,
+};
+
+static MACHDEP_RCMGR_PSM_INTDEV: Oid = Oid {
+    parent: &MACHDEP_CHILDREN,
+    link: None, // TODO: Implement this.
+    number: Sysctl::MACHDEP_RCMGR_PSM_INTDEV,
+    kind: Sysctl::CTLFLAG_RD | Sysctl::CTLTYPE_INT,
+    arg1: None,
+    arg2: 0,
+    name: "rcmgr_psm_intdev",
+    handler: Some(Sysctl::machdep_rcmgr_psm_intdev),
+    fmt: "I",
+    descr: "RCMgr PSM intdev",
     enabled: true,
 };
 
