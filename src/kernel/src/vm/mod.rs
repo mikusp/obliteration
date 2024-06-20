@@ -165,6 +165,7 @@ impl Vm {
         sys.register(203, &mm, Self::sys_mlock);
         sys.register(379, &mm, Self::sys_mtypeprotect);
         sys.register(477, &mm, Self::sys_mmap);
+        sys.register(547, &mm, Self::sys_query_memory_protection);
         sys.register(548, &mm, Self::sys_batch_map);
         sys.register(572, &mm, Self::sys_virtual_query);
         sys.register(588, &mm, Self::sys_mname);
@@ -2450,6 +2451,16 @@ impl Vm {
         } else {
             return Err(SysErr::Raw(EINVAL));
         }
+    }
+
+    fn sys_query_memory_protection(
+        self: &Arc<Self>,
+        _: &VThread,
+        i: &SysIn,
+    ) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_query_memory_protection");
+
+        Ok(SysOut::ZERO)
     }
 
     fn sys_mname(self: &Arc<Self>, _: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
