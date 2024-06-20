@@ -66,6 +66,7 @@ impl IpmiManager {
             0x241 => self.ipmi_invoke_async_method(out),
             0x243 => warn!("stubbed ipmi 0x243"),
             0x491 => self.ipmi_poll_event_flag(out),
+            0x490 => warn!("stubbed ipmi 0x490"),
             0x252 => self.ipmi_try_get_msg(out, ipmi_struct),
             _ => todo!("ipmi_command {:#x}", ipmi_command),
         }
