@@ -152,6 +152,7 @@ impl Fs {
         sys.register(90, &fs, Self::sys_dup2);
         sys.register(120, &fs, Self::sys_readv);
         sys.register(121, &fs, Self::sys_writev);
+        sys.register(128, &fs, Self::sys_rename);
         sys.register(136, &fs, Self::sys_mkdir);
         sys.register(188, &fs, Self::sys_stat);
         sys.register(189, &fs, Self::sys_fstat);
@@ -802,6 +803,15 @@ impl Fs {
         todo!()
     }
 
+    fn sys_rename(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let from = unsafe { i.args[0].to_path() }?.unwrap();
+        let to = unsafe { i.args[1].to_path() }?.unwrap();
+
+        warn!("stubbed sys_rename({}, {})", from, to);
+
+        Ok(SysOut::ZERO)
+    }
+
     fn sys_mkdir(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
         let path = unsafe { i.args[0].to_path() }?.unwrap();
         let mode: u32 = i.args[1].try_into().unwrap();
@@ -1076,6 +1086,7 @@ impl TryFrom<i32> for Whence {
 }
 
 bitflags! {
+    #[derive(Debug)]
     /// Flags for *at() syscalls.
     struct AtFlags: i32 {
         const SYMLINK_NOFOLLOW = 0x200;
