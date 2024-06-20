@@ -1,8 +1,8 @@
 use crate::errno::{ENOENT, ENOSYS, ESRCH};
 use crate::idt::{Entry, Idt};
-use crate::info;
 use crate::process::VThread;
 use crate::syscalls::{SysErr, SysIn, SysOut, Syscalls};
+use crate::{error, info};
 use std::sync::{Arc, Mutex};
 
 /// An implementation of budget system on the PS4.
@@ -16,6 +16,7 @@ impl BudgetManager {
             budgets: Mutex::new(Idt::new(0x1000)),
         });
 
+        sys.register(609, &mgr, Self::sys_budget_getid);
         sys.register(610, &mgr, Self::sys_budget_get_ptype);
 
         mgr
@@ -26,6 +27,12 @@ impl BudgetManager {
         let mut budgets = self.budgets.lock().unwrap();
 
         budgets.alloc(Entry::new(Some(name), Arc::new(budget), 0x2000))
+    }
+
+    fn sys_budget_getid(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_budget_getid");
+
+        Ok(SysOut::ZERO)
     }
 
     fn sys_budget_get_ptype(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
