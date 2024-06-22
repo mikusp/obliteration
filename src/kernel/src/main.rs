@@ -35,11 +35,13 @@ use crate::ucred::{AuthAttrs, AuthCaps, AuthInfo, AuthPaid, Gid, Ucred, Uid};
 use crate::umtx::UmtxManager;
 use clap::Parser;
 use dev::{
-    AjmInitError, AjmManager, CameraInitError, DceInitError, GcInitError, GeomInitError,
-    GeomManager, HidInitError, HmdInitError, IccInitError, IccManager, NotificationInitError,
-    NotificationManager, NpDrmInitError, NpDrmManager, RngInitError, SblSrvInitError,
-    UrandomInitError, UrandomManager,
+    AjmInitError, AjmManager, BtInitError, BtManager, CameraInitError, CdInitError, CdManager,
+    DceInitError, DevctlInitError, DevctlManager, GcInitError, GeomInitError, GeomManager,
+    HidInitError, HmdInitError, IccInitError, IccManager, IdataInitError, IdataManager,
+    NotificationInitError, NotificationManager, NpDrmInitError, NpDrmManager, RngInitError,
+    SblSrvInitError, UrandomInitError, UrandomManager, XptInitError, XptManager,
 };
+use ee::native::RawFn;
 use llt::{OsThread, SpawnError};
 use macros::vpath;
 use param::Param;
@@ -416,6 +418,16 @@ fn run() -> Result<(), KernelError> {
     let notification = NotificationManager::new()?;
     #[allow(unused_variables)] // TODO: Remove this when someone uses urandom.
     let urandom = UrandomManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses idata.
+    let idata = IdataManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses bt.
+    let bt = BtManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses devctl.
+    let devctl = DevctlManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses xpt.
+    let xpt = XptManager::new()?;
+    #[allow(unused_variables)] // TODO: Remove this when someone uses cd.
+    let cd = CdManager::new()?;
 
     // Initialize kernel components.
     #[allow(unused_variables)] // TODO: Remove this when someone uses debug.
@@ -686,6 +698,12 @@ enum KernelError {
     #[error("ajm manager initialization failed")]
     AjmManagerInitFailed(#[from] AjmInitError),
 
+    #[error("bt manager initialization failed")]
+    BtManagerInitFailed(#[from] BtInitError),
+
+    #[error("cd manager initialization failed")]
+    CdManagerInitFailed(#[from] CdInitError),
+
     #[error("gc manager initialization failed")]
     GcManagerInitFailed(#[from] GcInitError),
 
@@ -704,6 +722,9 @@ enum KernelError {
     #[error("dce manager initialization failed")]
     DceManagerInitFailed(#[from] DceInitError),
 
+    #[error("devctl manager initialization failed")]
+    DevctlManagerInitFailed(#[from] DevctlInitError),
+
     #[error("hid manager initialization failed")]
     HidManagerInitFailed(#[from] HidInitError),
 
@@ -713,6 +734,9 @@ enum KernelError {
     #[error("icc manager initialization failed")]
     IccManagerInitFailed(#[from] IccInitError),
 
+    #[error("idata manager initialization failed")]
+    IdataManagerInitFailed(#[from] IdataInitError),
+
     #[error("geom manager initialization failed")]
     GeomManagerInitFailed(#[from] GeomInitError),
 
@@ -721,6 +745,9 @@ enum KernelError {
 
     #[error("urandom manager initialization failed")]
     UrandomManagerInitFailed(#[from] UrandomInitError),
+
+    #[error("xpt manager initialization failed")]
+    XptManagerInitFailed(#[from] XptInitError),
 
     #[error("dmem manager initialization failed")]
     DmemManagerInitFailed(#[from] DmemManagerInitError),
