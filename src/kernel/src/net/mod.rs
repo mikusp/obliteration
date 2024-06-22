@@ -37,6 +37,7 @@ impl NetManager {
         sys.register(113, &net, Self::sys_socketex);
         sys.register(114, &net, Self::sys_socketclose);
         sys.register(118, &net, Self::sys_getsockopt);
+        sys.register(135, &net, Self::sys_socketpair);
         sys.register(125, &net, |_, _, i| {
             let arg0: usize = i.args[0].into();
             let arg1: usize = i.args[1].into();
@@ -262,6 +263,26 @@ impl NetManager {
         self.getsockopt(fd, level, name, value, len, td)?;
 
         Ok(SysOut::ZERO)
+    }
+
+    fn sys_socketpair(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        let domain: i32 = i.args[0].try_into().unwrap();
+        let typ: i32 = i.args[1].try_into().unwrap();
+        let protocol: i32 = i.args[2].try_into().unwrap();
+        let sv: usize = i.args[3].into();
+
+        info!(
+            "faked sys_socketpair({}, {}, {}, {})",
+            domain, typ, protocol, sv
+        );
+
+        unsafe {
+            if libc::socketpair(domain, typ, protocol, sv as _) < 0 {
+                Err(SysErr::Raw(EINVAL))
+            } else {
+                Ok(SysOut::ZERO)
+            }
+        }
     }
 
     fn sys_socketex(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
