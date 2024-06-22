@@ -192,6 +192,7 @@ commands! {
 
         /// Hid unknown
         HIDUNK1(&Unknown12) = 0x800c4802,
+        HIDUNK2(&Unknown32) = 0x80204829,
 
         /// Icc unknown
         ICCCONFUNK1(&mut Unknown2) = 0xc0029203,

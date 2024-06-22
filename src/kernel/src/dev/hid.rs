@@ -40,6 +40,7 @@ impl DeviceDriver for Hid {
     ) -> Result<(), Box<dyn Errno>> {
         match cmd {
             IoCmd::HIDUNK1(_) => warn!("ignoring HIDUNK1"),
+            IoCmd::HIDUNK2(_) => warn!("ignoring HIDUNK2"),
             _ => todo!(),
         }
 
