@@ -41,6 +41,7 @@ impl DeviceDriver for Icc {
         match cmd {
             IoCmd::ICCCONFUNK1(_) => warn!("ignoring ICCCONFUNK1"),
             IoCmd::ICCCONFUNK2(_) => warn!("ignoring ICCCONFUNK2"),
+            IoCmd::ICCINDSETDYNLEDBOOT => warn!("ignoring ICCINDSETDYNLEDBOOT"),
             _ => todo!(),
         }
 
@@ -50,6 +51,7 @@ impl DeviceDriver for Icc {
 
 pub struct IccManager {
     icc_configuration: Arc<CharacterDevice>,
+    icc_indicator: Arc<CharacterDevice>,
 }
 
 impl IccManager {
@@ -61,12 +63,27 @@ impl IccManager {
             "icc_configuration",
             Uid::ROOT,
             Gid::ROOT,
-            Mode::new(0o666).unwrap(),
+            Mode::new(0o600).unwrap(),
             None,
-            MakeDevFlags::MAKEDEV_ETERNAL,
+            MakeDevFlags::empty(),
         )?;
 
-        Ok(Arc::new(Self { icc_configuration }))
+        let icc_indicator = make_dev(
+            Icc::new(),
+            DriverFlags::from_bits_retain(0x80000000),
+            0,
+            "icc_indicator",
+            Uid::ROOT,
+            Gid::ROOT,
+            Mode::new(0o600).unwrap(),
+            None,
+            MakeDevFlags::empty(),
+        )?;
+
+        Ok(Arc::new(Self {
+            icc_configuration,
+            icc_indicator,
+        }))
     }
 }
 

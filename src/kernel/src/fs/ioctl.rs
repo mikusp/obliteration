@@ -199,6 +199,8 @@ commands! {
         /// Icc unknown
         ICCCONFUNK1(&mut Unknown2) = 0xc0029203,
         ICCCONFUNK2(&Unknown2) = 0x80029204,
+        ICCINDSETDYNLEDBOOT = 0x20009506,
+
 
         /// Get genuine random
         RNGGETGENUINE(&mut RngInput) = 0x40445301,
