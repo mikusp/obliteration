@@ -16,6 +16,8 @@ impl BudgetManager {
             budgets: Mutex::new(Idt::new(0x1000)),
         });
 
+        sys.register(568, &mgr, Self::sys_budget_create);
+        sys.register(570, &mgr, Self::sys_budget_get);
         sys.register(609, &mgr, Self::sys_budget_getid);
         sys.register(610, &mgr, Self::sys_budget_get_ptype);
 
@@ -27,6 +29,18 @@ impl BudgetManager {
         let mut budgets = self.budgets.lock().unwrap();
 
         budgets.alloc(Entry::new(Some(name), Arc::new(budget), 0x2000))
+    }
+
+    fn sys_budget_create(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_budget_create");
+
+        Ok(SysOut::ZERO)
+    }
+
+    fn sys_budget_get(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
+        error!("stubbed sys_budget_get");
+
+        Ok(SysOut::ZERO)
     }
 
     fn sys_budget_getid(self: &Arc<Self>, td: &VThread, i: &SysIn) -> Result<SysOut, SysErr> {
