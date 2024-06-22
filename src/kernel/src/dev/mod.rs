@@ -1,4 +1,5 @@
 pub use ajm::*;
+pub use bt::*;
 pub use camera::*;
 pub use dce::*;
 pub use deci::*;
@@ -18,6 +19,7 @@ pub use ttyconsole::*;
 pub use urandom::*;
 
 mod ajm;
+mod bt;
 mod camera;
 mod dce;
 mod deci;

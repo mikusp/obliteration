@@ -99,6 +99,8 @@ commands! {
         /// An unkown bnet command, called from libSceNet
         BNETUNK(&Unknown36) = 0x802450c9,
 
+        BTSTARTMODE(&i32) = 0x8004622a,
+
         /// dce commands
         DCEFLIPCONTROL(&mut DceFlipControl) = 0xC0308203,
 
