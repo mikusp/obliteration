@@ -1,6 +1,7 @@
 pub use ajm::*;
 pub use bt::*;
 pub use camera::*;
+pub use cd::*;
 pub use dce::*;
 pub use deci::*;
 pub use devctl::*;
@@ -19,10 +20,12 @@ pub use rng::*;
 pub use sbl_srv::*;
 pub use ttyconsole::*;
 pub use urandom::*;
+pub use xpt::*;
 
 mod ajm;
 mod bt;
 mod camera;
+mod cd;
 mod dce;
 mod deci;
 mod devctl;
@@ -41,3 +44,4 @@ mod rng;
 mod sbl_srv;
 mod ttyconsole;
 mod urandom;
+mod xpt;

@@ -220,6 +220,10 @@ commands! {
 
         /// Become controlling terminal.
         TIOCSCTTY = 0x20007461,
+
+        /// Used by xpt0 and cd0
+        DEVUNK2(&mut Unknown<1192>) = 0xc4a81602,
+        DEVUNK3(&mut Unknown<1192>) = 0xc4a81603,
     }
 }
 
@@ -228,6 +232,7 @@ type Unknown8 = Unknown<8>;
 type Unknown12 = Unknown<12>;
 type Unknown16 = Unknown<16>;
 type Unknown24 = Unknown<24>;
+type Unknown32 = Unknown<32>;
 type Unknown36 = Unknown<36>;
 type Unknown40 = Unknown<40>;
 type Unknown48 = Unknown<48>;
