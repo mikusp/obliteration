@@ -132,6 +132,8 @@ commands! {
         DMEMGETAVAIL(&mut DmemAvailable) = 0xC0208016,
         /// Allocate direct memory
         DMEMALLOC(&mut DmemAllocate) = 0xC0288001,
+        /// Release direct memory
+        DMEMRELEASE(&Unknown16) = 0x80108002,
         /// Allocate main direct memory
         DMEMALLOCMAIN(&mut DmemAllocate) = 0xC0288011,
         /// Query direct memory

@@ -142,6 +142,9 @@ impl DeviceDriver for Dmem {
 
                 alloc.start_or_phys_out = phys_addr.0
             }
+            IoCmd::DMEMRELEASE(args) => {
+                error!("stubbed DMEMRELEASE({:?})", args);
+            }
             IoCmd::DMEMALLOCMAIN(alloc) => {
                 let phys_addr = td
                     .proc()
